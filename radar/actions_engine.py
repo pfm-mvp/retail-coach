@@ -12,7 +12,7 @@ def safe_div(n, d):
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "conversion_rate" in out.columns:
-        cr = out["conversion_rate"].astype(float)a
+        cr = out["conversion_rate"].astype(float)
         out["conversion_rate"] = cr/100.0 if cr.max() > 1.5 else cr
     else:
         out["conversion_rate"] = out.apply(lambda r: safe_div(r.get("transactions",0), r.get("count_in",0)), axis=1)
