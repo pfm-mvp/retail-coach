@@ -14,21 +14,83 @@ from radar.actions_engine import generate_actions
 from radar.best_practice import top_performers
 from radar.demographics import has_gender_data, gender_insights
 
-# --- ROBUST import van shop_mapping.py met fallback ---
-SHOP_NAME_MAP = {}
+# ==== mapping robust ====
+SHOP_ID_TO_NAME, NAME_TO_ID = {}, {}
 try:
-    from shop_mapping import SHOP_NAME_MAP as _MAP  # exact bestandsnaam/variabelenaam
-    if isinstance(_MAP, dict):
-        SHOP_NAME_MAP = _MAP
+    # Ondersteun beide varianten:
+    from shop_mapping import SHOP_ID_TO_NAME as _BY_ID  # {id: "Naam"}
 except Exception:
-    # Hard fallback: laad handmatig vanaf pad (dekt edge-cases in Streamlit runner)
-    import importlib.util, pathlib
-    sm_path = pathlib.Path(ROOT) / "shop_mapping.py"
-    if sm_path.exists():
-        spec = importlib.util.spec_from_file_location("shop_mapping", sm_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore
-        SHOP_NAME_MAP = getattr(mod, "SHOP_NAME_MAP", {}) or {}
+    _BY_ID = {}
+
+if not _BY_ID:
+    try:
+        from shop_mapping import SHOP_NAME_MAP as _BY_NAME  # {"Naam": id}
+    except Exception:
+        _BY_NAME = {}
+    if _BY_NAME:
+        NAME_TO_ID = dict(_BY_NAME)
+        SHOP_ID_TO_NAME = {sid: name for name, sid in _BY_NAME.items()}
+else:
+    SHOP_ID_TO_NAME = dict(_BY_ID)
+    NAME_TO_ID = {name: sid for sid, name in SHOP_ID_TO_NAME.items()}
+
+# ==== UI: multiselect op basis van mapping ====
+c5, c6 = st.columns([2, 1])
+with c5:
+    if NAME_TO_ID:
+        names = sorted(NAME_TO_ID.keys(), key=str.lower)
+        selected_names = st.multiselect("Selecteer winkels", names, default=names[:1])
+        shop_ids = [NAME_TO_ID[n] for n in selected_names]
+    elif SHOP_ID_TO_NAME:
+        # fallback indien alleen by_id bestaat
+        opts = sorted([(name, sid) for sid, name in SHOP_ID_TO_NAME.items()], key=lambda x: x[0].lower())
+        selected_names = st.multiselect("Selecteer winkels", [o[0] for o in opts], default=[opts[0][0]] if opts else [])
+        shop_ids = [dict(opts)[n] for n in selected_names] if selected_names else []
+    else:
+        st.warning("Geen shops gevonden in shop_mapping.py. Gebruik SHOP_ID_TO_NAME of SHOP_NAME_MAP.")
+        shop_ids = []
+with c6:
+    analyze = st.button("🔍 Analyseer", use_container_width=True)
+
+# ==== duidelijke check op API_URL ====
+API_URL = st.secrets.get("API_URL", "")
+if not API_URL:
+    st.warning("Stel `API_URL` in via .streamlit/secrets.toml (bijv. https://…/get-report).")
+    st.stop()
+
+# ==== analyse met spinner + foutafhandeling ====
+if analyze:
+    if not shop_ids:
+        st.info("Selecteer minimaal één winkel.")
+        st.stop()
+
+    outs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sqm_meter",
+            "demographics_gender_male","demographics_gender_female"]
+
+    with st.spinner("Analyseren…"):
+        try:
+            resp = fetch_report(
+                api_url=API_URL,
+                shop_ids=shop_ids,
+                data_outputs=outs,
+                date_from=str(d_from),
+                date_to=str(d_to),
+                period_step=period_step,
+            )
+        except Exception as e:
+            st.error(f"Fout bij ophalen data: {e}")
+            st.stop()
+
+    df = normalize(resp, ts_key="timestamp")
+    if df.empty:
+        st.info("Geen data voor de gekozen filters/periode.")
+        st.stop()
+
+    # namen mappen (werkt voor beide varianten)
+    if SHOP_ID_TO_NAME:
+        df["shop_name"] = df["shop_id"].map(SHOP_ID_TO_NAME).fillna(df.get("shop_name",""))
+
+    # … (rest van Next Best Action / Best Practices / Demografie ongewijzigd)
 
 st.set_page_config(page_title="Retail Performance Radar", page_icon="📊", layout="wide")
 
