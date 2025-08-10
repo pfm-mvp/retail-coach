@@ -1,7 +1,7 @@
-streamlit>=1.30.0
+streamlit>=1.32.0
 pandas>=2.0.0
 requests>=2.31.0
 matplotlib>=3.7.0
 plotly>=5.18.0
-fpdf==1.7.2
-requests
+fpdf>==1.7.2
+requests>=2.31
