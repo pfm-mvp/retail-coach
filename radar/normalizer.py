@@ -1,18 +1,11 @@
 
-from typing import Dict, List
+from typing import Dict
 import pandas as pd
 
-def normalize(resp_json: Dict, ts_key: str = "timestamp") -> pd.DataFrame:
-    """
-    Robust normalizer for Vemcount-like nested JSON.
-    Handles day/hour data. Creates columns:
-      shop_id, shop_name, date, hour, period_label, KPI columns...
-    """
+def normalize(resp_json: Dict, ts_key: str = "timestamp"):
     rows = []
     data_block = resp_json.get("data") or resp_json
-
-    # Expect: data -> date_YYYY-MM-DD -> shop_id -> { meta, dates{ ts: {data:{...}} } }
-    for date_key, per_shop in data_block.items():
+    for date_key, per_shop in (data_block or {}).items():
         if not isinstance(per_shop, dict):
             continue
         for shop_id, shop_obj in per_shop.items():
@@ -30,7 +23,6 @@ def normalize(resp_json: Dict, ts_key: str = "timestamp") -> pd.DataFrame:
                     except Exception:
                         row[k] = 0.0
                 rows.append(row)
-
     df = pd.DataFrame(rows)
     if df.empty:
         return df
