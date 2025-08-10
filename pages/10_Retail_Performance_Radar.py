@@ -14,47 +14,26 @@ if ROOT not in sys.path:
 from radar.normalizer import normalize
 from radar.actions_engine import generate_actions
 from radar.best_practice import top_performers
-# Demografie is optioneel; sectie toont alleen iets als er data is (we vragen het nu niet op)
-from radar.demographics import has_gender_data, gender_insights
+from radar.demographics import has_gender_data, gender_insights  # optioneel, we vragen geen demodata op
 
 # ---------- Page config & styling ----------
 st.set_page_config(page_title="Retail Performance Radar", page_icon="📊", layout="wide")
 
-# ✅ Styling: paarse pills & rode knop (zoals aangeleverd)
+# ✅ Styling: paarse pills & rode knop (jouw CSS)
 st.markdown(
     """
     <style>
-    /* Font import (optioneel) */
     @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
-
-    /* Forceer Instrument Sans als standaard font */
-    html, body, [class*="css"] {
-        font-family: 'Instrument Sans', sans-serif !important;
-    }
-
-    /* 🎨 Multiselect pills in paars */
-    [data-baseweb="tag"] {
-        background-color: #9E77ED !important;
-        color: white !important;
-    }
-
-    /* 🔴 "Analyseer" knop in PFM-rood */
+    html, body, [class*="css"] { font-family: 'Instrument Sans', sans-serif !important; }
+    [data-baseweb="tag"] { background-color: #9E77ED !important; color: white !important; }
     button[data-testid="stBaseButton-secondary"] {
-        background-color: #F04438 !important;
-        color: white !important;
-        border-radius: 16px !important;
-        font-weight: 600 !important;
+        background-color: #F04438 !important; color: white !important;
+        border-radius: 16px !important; font-weight: 600 !important;
         font-family: "Instrument Sans", sans-serif !important;
-        padding: 0.6rem 1.4rem !important;
-        border: none !important;
-        box-shadow: none !important;
+        padding: 0.6rem 1.4rem !important; border: none !important; box-shadow: none !important;
         transition: background-color 0.2s ease-in-out;
     }
-
-    button[data-testid="stBaseButton-secondary"]:hover {
-        background-color: #d13c30 !important;
-        cursor: pointer;
-    }
+    button[data-testid="stBaseButton-secondary"]:hover { background-color: #d13c30 !important; cursor: pointer; }
     </style>
     """,
     unsafe_allow_html=True
@@ -135,7 +114,7 @@ if not API_URL:
     st.warning("Stel `API_URL` in via **.streamlit/secrets.toml** (bijv. https://…/get-report).")
     st.stop()
 
-# ---------- Inline fetch: post DIRECT naar API_URL (geen /get-report toevoegen) ----------
+# ---------- Inline fetch: POST DIRECT naar API_URL met data[] en data_output[] ----------
 def fetch_report_inline(api_url: str, shop_ids, data_outputs, date_from: str, date_to: str, period_step: str = "day", timeout: int = 60):
     if not shop_ids:
         raise ValueError("shop_ids empty")
@@ -148,13 +127,10 @@ def fetch_report_inline(api_url: str, shop_ids, data_outputs, date_from: str, da
         "form_date_from": date_from,
         "form_date_to": date_to,
         "period_step": period_step,
+        # let op []-sleutels
+        "data[]": [int(s) for s in shop_ids],
+        "data_output[]": list(data_outputs),
     }
-    for sid in shop_ids:
-        params.setdefault("data", []).append(int(sid))
-    for out in data_outputs:
-        params.setdefault("data_output", []).append(out)
-
-    # Belangrijk: direct posten naar api_url zoals in secrets staat
     r = requests.post(api_url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
@@ -165,10 +141,10 @@ if analyze:
         st.info("Selecteer minimaal één winkel.")
         st.stop()
 
-    # VRAAG GEEN DEMOGRAFIE OP in deze call (per jouw verzoek)
+    # Geen demografie in deze call
     outs = [
         "count_in", "transactions", "turnover",
-        "conversion_rate", "sales_per_visitor", "sqm_meter",
+        "conversion_rate", "sales_per_visitor", "sq_meter",
     ]
 
     with st.spinner("Analyseren…"):
@@ -235,8 +211,7 @@ if analyze:
             use_container_width=True
         )
 
-    # ---------- Demografie (optioneel) ----------
-    # We vroegen géén demographics op; sectie toont alleen iets als je elders merge't met genderdata.
+    # ---------- Demografie (optioneel; niet opgevraagd in deze call) ----------
     if has_gender_data(df):
         st.markdown("### 👥 Demografiepatronen (optioneel)")
         gi = gender_insights(df, top_n=3)
