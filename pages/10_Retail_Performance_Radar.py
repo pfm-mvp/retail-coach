@@ -2,10 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import plotly.express as px
 from datetime import date, timedelta
 
-# ========== Styling ==========
+# ========== Page & Styling ==========
 st.set_page_config(page_title="Retail Performance Radar", page_icon="📊", layout="wide")
 st.markdown("""
 <style>
@@ -24,10 +23,7 @@ button[data-testid="stBaseButton-secondary"]:hover {
   background-color: #d13c30 !important; cursor: pointer;
 }
 /* Cards */
-.card {
-  border: 1px solid #eee; border-radius: 12px; padding: 14px 16px; background:#fff;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-}
+.card { border: 1px solid #eee; border-radius: 12px; padding: 14px 16px; background:#fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
 .card h4 { margin: 0 0 6px 0; font-size: 1.0rem; }
 .card .muted { color:#666; font-size: 0.85rem; }
 .badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:0.8rem; font-weight:600; }
@@ -42,7 +38,6 @@ button[data-testid="stBaseButton-secondary"]:hover {
 # ========== Helpers ==========
 EPS = 1e-9
 DEFAULT_SQ_METER = 1.0
-PFM_PURPLE = "#762181"
 
 def fmt_eur(x: float) -> str:
     return ("€{:,.0f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X", ".")
@@ -61,9 +56,9 @@ NAME_TO_ID = {v: k for k, v in SHOP_ID_TO_NAME.items()}
 
 # ========== Titel & inputs ==========
 st.title("📊 Retail Performance Radar")
+
 today = date.today()
 default_from = today - timedelta(days=7)
-
 c1, c2 = st.columns(2)
 with c1: date_from = st.date_input("Van", default_from)
 with c2: date_to   = st.date_input("Tot", today - timedelta(days=1))
@@ -72,18 +67,21 @@ names = sorted(NAME_TO_ID.keys(), key=str.lower)
 selected_names = st.multiselect("Selecteer winkels", names, default=names[:1], key="shop_selector")
 shop_ids = [NAME_TO_ID[n] for n in selected_names]
 
-gran = st.selectbox("Granulariteit", ["Dag","Uur"], index=0)
-period_step = "day" if gran == "Dag" else "hour"
-
 c3, c4 = st.columns(2)
 with c3:
-    conv_target_pct = st.slider("Conversiedoel (%)", 1, 80, 20, 1)
+    gran = st.selectbox("Granulariteit", ["Dag","Uur"], index=0)
+    period_step = "day" if gran == "Dag" else "hour"
 with c4:
-    csm2i_target = st.slider("CSm²I-target", 0.10, 2.00, 1.00, 0.05)
+    # Sliders (incl. SPV-uplift slider terug)
+    conv_target_pct = st.slider("Conversiedoel (%)", 1, 80, 20, 1)
+    spv_uplift_pct  = st.slider("SPV‑uplift (%)", 5, 50, 10, 5)
+c5, c6 = st.columns(2)
+with c5:
+    csm2i_target = st.slider("CSm²I‑target", 0.10, 2.00, 1.00, 0.05)
 
 analyze = st.button("🔍 Analyseer", key="analyze_button", type="secondary")
 
-# ========== API call ==========
+# ========== API & Normalizer ==========
 def fetch_report_inline(api_url, shop_ids, date_from, date_to, period_step, data_outputs, timeout=30):
     params = [
         ("source", "shops"),
@@ -119,26 +117,20 @@ def normalize(resp, shop_map):
 # ========== KPI verrijking ==========
 def ensure_basics(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-
-    # 1) Alles wat we rekenen eerst numeriek maken
-    for col in ["turnover", "transactions", "count_in", "sales_per_visitor", "conversion_rate", "sq_meter"]:
+    # 1) Numeriek forceren
+    for col in ["turnover","transactions","count_in","sales_per_visitor","conversion_rate","sq_meter"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
-
-    # 2) Conversie normaliseren (API kan % of fractie leveren)
+    # 2) Conversie naar fractie (niet naar %)
     if "conversion_rate" in out.columns and not out["conversion_rate"].empty:
-        # Als max > 1.5 dan is het waarschijnlijk in %
-        out["conversion_rate"] = out["conversion_rate"].where(out["conversion_rate"].max() <= 1.5,
-                                                             out["conversion_rate"] / 100.0)
+        if out["conversion_rate"].max() > 1.5:  # waarschijnlijk in %
+            out["conversion_rate"] = out["conversion_rate"] / 100.0
     else:
         out["conversion_rate"] = out.get("transactions", 0.0) / (out.get("count_in", 0.0) + EPS)
-
-    # 3) SPV en ATV berekenen (of herberekenen, nu de inputs numeriek zijn)
-    if "sales_per_visitor" not in out.columns or (out["sales_per_visitor"].isna().all()):
+    # 3) SPV & ATV
+    if "sales_per_visitor" not in out.columns or out["sales_per_visitor"].isna().all():
         out["sales_per_visitor"] = out.get("turnover", 0.0) / (out.get("count_in", 0.0) + EPS)
-
     out["atv"] = out.get("turnover", 0.0) / (out.get("transactions", 0.0) + EPS)
-
     return out
 
 def add_csm2i(df: pd.DataFrame, target_index: float = 1.0) -> pd.DataFrame:
@@ -165,7 +157,7 @@ def rule_high_traffic_low_conv(df: pd.DataFrame, conv_target: float) -> pd.DataF
     items = []
     for (sid, sname), g in df.groupby(["shop_id","shop_name"], dropna=False):
         if g["count_in"].sum() <= 0: continue
-        thr = g["count_in"].quantile(0.75)
+        thr  = g["count_in"].quantile(0.75)
         mean = g["conversion_rate"].mean()
         std  = g["conversion_rate"].std(ddof=0) or 1e-9
         target = conv_target if isinstance(conv_target,(int,float)) else mean
@@ -214,12 +206,14 @@ def rule_csm2i_gap(df: pd.DataFrame, target_index: float = 1.0) -> pd.DataFrame:
     return pd.DataFrame(items)
 
 def generate_actions(df: pd.DataFrame, conv_target: float, spv_uplift: float, csm2i_target: float) -> pd.DataFrame:
-    a = []
-    a.append(rule_high_traffic_low_conv(df, conv_target))
-    a.append(rule_low_spv_ok_conv(df, spv_uplift))
-    a.append(rule_csm2i_gap(df, csm2i_target))
-    out = pd.concat([x for x in a if not x.empty], ignore_index=True) if any([not x.empty for x in a]) else pd.DataFrame()
-    if out.empty: return out
+    parts = [
+        rule_high_traffic_low_conv(df, conv_target),
+        rule_low_spv_ok_conv(df, spv_uplift),
+        rule_csm2i_gap(df, csm2i_target)
+    ]
+    parts = [p for p in parts if not p.empty]
+    if not parts: return pd.DataFrame()
+    out = pd.concat(parts, ignore_index=True)
     return out.sort_values("expected_impact_eur", ascending=False).reset_index(drop=True)
 
 # ========== Best Practice Finder ==========
@@ -265,11 +259,11 @@ if analyze:
         st.info("Geen data voor de gekozen filters/periode.")
         st.stop()
 
-    # Verrijk KPI's
+    # Verrijk KPI's en CSm²I
     df = ensure_basics(df)
     df = add_csm2i(df, target_index=csm2i_target)
 
-    # ===== CSm²I impact cards =====
+    # ===== 📐 CSm²I impact cards =====
     st.markdown("### 📐 CSm²I impact (per winkel)")
     csi_by_shop = df.groupby(["shop_id","shop_name"], dropna=False).agg(
         csi=("csm2i","mean"),
@@ -297,12 +291,12 @@ if analyze:
                     </div>
                 """, unsafe_allow_html=True)
 
-    # ===== Top 3 verbeterpunten per winkel =====
+    # ===== 🎯 Top 3 verbeterpunten per winkel =====
     st.markdown("### 🎯 Top 3 verbeterpunten per winkel")
     actions = generate_actions(
         df,
         conv_target=conv_target_pct/100.0,
-        spv_uplift=0.10,            # desgewenst slider toevoegen
+        spv_uplift=spv_uplift_pct/100.0,  # <-- slider gebruikt
         csm2i_target=csm2i_target
     )
     if actions.empty:
@@ -323,7 +317,7 @@ if analyze:
                     </div>
                 """, unsafe_allow_html=True)
 
-    # ===== Best Practice Finder =====
+    # ===== 🏆 Best Practice Finder =====
     st.markdown("### 🏆 Best Practice Finder")
     bp = top_performers_enriched(df, n=5)
     if bp.empty:
