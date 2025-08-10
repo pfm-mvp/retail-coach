@@ -16,43 +16,39 @@ from radar.actions_engine import generate_actions
 from radar.best_practice import top_performers
 from radar.demographics import has_gender_data, gender_insights
 
-# ---------- Shop mapping: ondersteunt jouw SHOP_NAME_MAP (id -> naam) ----------
+# ---------- Shop mapping: jouw SHOP_NAME_MAP (id -> naam) ----------
 SHOP_ID_TO_NAME, NAME_TO_ID = {}, {}
 
-# 1) Probeer jouw vorm: SHOP_NAME_MAP = { id:int -> name:str }
 try:
-    from shop_mapping import SHOP_NAME_MAP as _MAP_ID_TO_NAME
+    from shop_mapping import SHOP_NAME_MAP as _MAP_ID_TO_NAME  # {id:int: "Naam":str}
 except Exception:
     _MAP_ID_TO_NAME = {}
 
-# 2) Optioneel: fallback als je ook SHOP_ID_TO_NAME hebt
 try:
-    from shop_mapping import SHOP_ID_TO_NAME as _ALT_ID_TO_NAME
+    from shop_mapping import SHOP_ID_TO_NAME as _ALT_ID_TO_NAME  # fallback
 except Exception:
     _ALT_ID_TO_NAME = {}
 
 if _MAP_ID_TO_NAME:
-    # forceer types en filter lege namen
     SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _MAP_ID_TO_NAME.items() if str(v).strip()}
 elif _ALT_ID_TO_NAME:
     SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _ALT_ID_TO_NAME.items() if str(v).strip()}
 else:
     SHOP_ID_TO_NAME = {}
 
-# Bouw inverse mapping: name -> id
 NAME_TO_ID = {name: sid for sid, name in SHOP_ID_TO_NAME.items()}
 
 # ---------- Inputs: rij 2 (shops) ----------
 if NAME_TO_ID:
     names = sorted(NAME_TO_ID.keys(), key=lambda s: s.lower())
-    selected_names = st.multiselect("Selecteer winkels", names, default=names[:1])
+    selected_names = st.multiselect("Selecteer winkels", names, default=names[:1], key="shop_selector")
     shop_ids = [NAME_TO_ID[n] for n in selected_names]
 else:
-    st.warning("Geen geldige shops gevonden in **shop_mapping.py**. Verwacht: SHOP_NAME_MAP = {id:int: 'Naam':str}.")
+    st.warning("Geen geldige shops gevonden in shop_mapping.py (verwacht: SHOP_NAME_MAP = {id:int: 'Naam':str}).")
     shop_ids = []
 
 # ---------- Analyseer-knop (links, onder inputs) ----------
-analyze = st.button("🔍 Analyseer")
+analyze = st.button("🔍 Analyseer", key="analyze_button")
 
 st.markdown("## 📊 Retail Performance Radar")
 st.caption("Next Best Action • Best Practice Finder • (optioneel) Demografiepatronen")
