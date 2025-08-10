@@ -2,8 +2,6 @@
 from typing import List, Dict, Optional
 import pandas as pd
 
-PFM_RED = "#F04438"
-
 def safe_div(n, d):
     try:
         n = float(n); d = float(d)
@@ -14,7 +12,7 @@ def safe_div(n, d):
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "conversion_rate" in out.columns:
-        cr = out["conversion_rate"].astype(float)
+        cr = out["conversion_rate"].astype(float)a
         out["conversion_rate"] = cr/100.0 if cr.max() > 1.5 else cr
     else:
         out["conversion_rate"] = out.apply(lambda r: safe_div(r.get("transactions",0), r.get("count_in",0)), axis=1)
@@ -77,7 +75,7 @@ def add_csm2i(df: pd.DataFrame, target_index: float = 1.0) -> pd.DataFrame:
     out["sales_per_sqm"] = out.apply(lambda r: safe_div(r.get("turnover",0), r.get("sqm_meter",0)), axis=1)
     bench = out.groupby("shop_id")["sales_per_sqm"].transform("mean").replace([None], 0.0)
     out["csm2i"] = out.apply(lambda r: safe_div(r["sales_per_sqm"], bench.loc[r.name] if r.name in bench.index else 0.0), axis=1)
-    out["csm2i_gap"] = out.apply(lambda r: max(0.0, target_index - (r["csm2i"] if r.get("csm2i")==r.get("csm2i") else 0.0)), axis=1)
+    out["csm2i_gap"] = out.apply(lambda r: max(0.0, target_index - (r.get('csm2i') if r.get('csm2i')==r.get('csm2i') else 0.0)), axis=1)
     out["csm2i_uplift_eur"] = out["csm2i_gap"] * bench * out["sqm_meter"]
     return out
 
@@ -87,7 +85,6 @@ def generate_actions(df: pd.DataFrame, conv_target: Optional[float], spv_uplift:
     items = []
     items += rule_high_traffic_low_conv(base, conv_target)
     items += rule_low_spv_ok_conv(base, spv_uplift)
-    # CSm²I-based opportunities
     for (sid, sname), g in base.groupby(["shop_id","shop_name"], dropna=False):
         miss = g[g["csm2i_gap"] > 0]
         if miss.empty: continue
