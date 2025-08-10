@@ -17,39 +17,49 @@ from radar.best_practice import top_performers
 from radar.demographics import has_gender_data, gender_insights
 
 # ---------- Robuuste import van shop_mapping ----------
-# Ondersteunt beide varianten: SHOP_NAME_MAP {"Naam": id} OF SHOP_ID_TO_NAME {id: "Naam"}
 SHOP_ID_TO_NAME, NAME_TO_ID = {}, {}
 
 try:
-    # eerst proberen of je met naam->id werkt
-    from shop_mapping import SHOP_NAME_MAP as _BY_NAME  # {"Amsterdam": 31977}
+    from shop_mapping import SHOP_NAME_MAP as _BY_NAME  # verwacht {"Naam": id}
 except Exception:
     _BY_NAME = {}
 
 try:
-    from shop_mapping import SHOP_ID_TO_NAME as _BY_ID  # {31977: "Amsterdam"}
+    from shop_mapping import SHOP_ID_TO_NAME as _BY_ID  # verwacht {id: "Naam"}
 except Exception:
     _BY_ID = {}
 
+# Normaliseer mapping, ook als types niet exact kloppen
 if _BY_NAME:
-    NAME_TO_ID = dict(_BY_NAME)
-    SHOP_ID_TO_NAME = {sid: name for name, sid in _BY_NAME.items()}
+    # forceer naam->id (namen als strings)
+    NAME_TO_ID = {str(k): int(v) for k, v in _BY_NAME.items()}
+    SHOP_ID_TO_NAME = {v: k for k, v in NAME_TO_ID.items()}
 elif _BY_ID:
-    SHOP_ID_TO_NAME = dict(_BY_ID)
-    NAME_TO_ID = {name: sid for sid, name in _BY_ID.items()}
+    # forceer id->naam (namen als strings)
+    SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _BY_ID.items()}
+    NAME_TO_ID = {v: k for k, v in SHOP_ID_TO_NAME.items()}
 
-# ---------- Page config & styling ----------
-st.set_page_config(page_title="Retail Performance Radar", page_icon="📊", layout="wide")
-st.markdown("""
-<style>
-/* PFM-rode knop voor alle st.button (Analyseer) */
-div.stButton > button { background:#F04438 !important; color:#fff !important;
-  border:0 !important; border-radius:8px !important; }
-div.stButton > button:hover { filter:brightness(0.95); }
-/* Klein beetje tighter spacing in headers */
-h2, h3 { margin-top: 0.4rem; }
-</style>
-""", unsafe_allow_html=True)
+# ---------- Inputs: rij 2 (shops) ----------
+if NAME_TO_ID:
+    # Sorteer veilig, ongeacht type
+    names = sorted(NAME_TO_ID.keys(), key=lambda x: str(x).lower())
+    selected_names = st.multiselect("Selecteer winkels", names, default=names[:1])
+    shop_ids = [int(NAME_TO_ID[n]) for n in selected_names]
+elif SHOP_ID_TO_NAME:
+    # Fallback indien alleen id->naam aanwezig is
+    opts = sorted([(str(name), int(sid)) for sid, name in SHOP_ID_TO_NAME.items()],
+                  key=lambda x: x[0].lower())
+    all_names = [o[0] for o in opts]
+    selected_names = st.multiselect("Selecteer winkels", all_names,
+                                    default=[all_names[0]] if all_names else [])
+    name_to_id = {name: sid for name, sid in opts}
+    shop_ids = [name_to_id[n] for n in selected_names] if selected_names else []
+else:
+    st.warning("Geen shops gevonden in **shop_mapping.py**. Gebruik `SHOP_NAME_MAP` of `SHOP_ID_TO_NAME`.")
+    shop_ids = []
+
+# ---------- Analyseer-knop (links, onder inputs) ----------
+analyze = st.button("🔍 Analyseer")
 
 st.markdown("## 📊 Retail Performance Radar")
 st.caption("Next Best Action • Best Practice Finder • (optioneel) Demografiepatronen")
