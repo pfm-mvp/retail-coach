@@ -16,46 +16,39 @@ from radar.actions_engine import generate_actions
 from radar.best_practice import top_performers
 from radar.demographics import has_gender_data, gender_insights
 
-# ---------- Robuuste import van shop_mapping ----------
+# ---------- Shop mapping: ondersteunt jouw SHOP_NAME_MAP (id -> naam) ----------
 SHOP_ID_TO_NAME, NAME_TO_ID = {}, {}
 
+# 1) Probeer jouw vorm: SHOP_NAME_MAP = { id:int -> name:str }
 try:
-    from shop_mapping import SHOP_NAME_MAP as _BY_NAME  # verwacht {"Naam": id}
+    from shop_mapping import SHOP_NAME_MAP as _MAP_ID_TO_NAME
 except Exception:
-    _BY_NAME = {}
+    _MAP_ID_TO_NAME = {}
 
+# 2) Optioneel: fallback als je ook SHOP_ID_TO_NAME hebt
 try:
-    from shop_mapping import SHOP_ID_TO_NAME as _BY_ID  # verwacht {id: "Naam"}
+    from shop_mapping import SHOP_ID_TO_NAME as _ALT_ID_TO_NAME
 except Exception:
-    _BY_ID = {}
+    _ALT_ID_TO_NAME = {}
 
-# Normaliseer mapping, ook als types niet exact kloppen
-if _BY_NAME:
-    # forceer naam->id (namen als strings)
-    NAME_TO_ID = {str(k): int(v) for k, v in _BY_NAME.items()}
-    SHOP_ID_TO_NAME = {v: k for k, v in NAME_TO_ID.items()}
-elif _BY_ID:
-    # forceer id->naam (namen als strings)
-    SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _BY_ID.items()}
-    NAME_TO_ID = {v: k for k, v in SHOP_ID_TO_NAME.items()}
+if _MAP_ID_TO_NAME:
+    # forceer types en filter lege namen
+    SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _MAP_ID_TO_NAME.items() if str(v).strip()}
+elif _ALT_ID_TO_NAME:
+    SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _ALT_ID_TO_NAME.items() if str(v).strip()}
+else:
+    SHOP_ID_TO_NAME = {}
+
+# Bouw inverse mapping: name -> id
+NAME_TO_ID = {name: sid for sid, name in SHOP_ID_TO_NAME.items()}
 
 # ---------- Inputs: rij 2 (shops) ----------
 if NAME_TO_ID:
-    # Sorteer veilig, ongeacht type
-    names = sorted(NAME_TO_ID.keys(), key=lambda x: str(x).lower())
+    names = sorted(NAME_TO_ID.keys(), key=lambda s: s.lower())
     selected_names = st.multiselect("Selecteer winkels", names, default=names[:1])
-    shop_ids = [int(NAME_TO_ID[n]) for n in selected_names]
-elif SHOP_ID_TO_NAME:
-    # Fallback indien alleen id->naam aanwezig is
-    opts = sorted([(str(name), int(sid)) for sid, name in SHOP_ID_TO_NAME.items()],
-                  key=lambda x: x[0].lower())
-    all_names = [o[0] for o in opts]
-    selected_names = st.multiselect("Selecteer winkels", all_names,
-                                    default=[all_names[0]] if all_names else [])
-    name_to_id = {name: sid for name, sid in opts}
-    shop_ids = [name_to_id[n] for n in selected_names] if selected_names else []
+    shop_ids = [NAME_TO_ID[n] for n in selected_names]
 else:
-    st.warning("Geen shops gevonden in **shop_mapping.py**. Gebruik `SHOP_NAME_MAP` of `SHOP_ID_TO_NAME`.")
+    st.warning("Geen geldige shops gevonden in **shop_mapping.py**. Verwacht: SHOP_NAME_MAP = {id:int: 'Naam':str}.")
     shop_ids = []
 
 # ---------- Analyseer-knop (links, onder inputs) ----------
