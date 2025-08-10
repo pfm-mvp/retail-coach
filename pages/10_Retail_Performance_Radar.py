@@ -72,10 +72,9 @@ with c3:
     gran = st.selectbox("Granulariteit", ["Dag","Uur"], index=0)
     period_step = "day" if gran == "Dag" else "hour"
 with c4:
-    # Sliders (incl. SPV-uplift slider terug)
     conv_target_pct = st.slider("Conversiedoel (%)", 1, 80, 20, 1)
     spv_uplift_pct  = st.slider("SPV‑uplift (%)", 5, 50, 10, 5)
-c5, c6 = st.columns(2)
+c5, _ = st.columns(2)
 with c5:
     csm2i_target = st.slider("CSm²I‑target", 0.10, 2.00, 1.00, 0.05)
 
@@ -98,14 +97,16 @@ def fetch_report_inline(api_url, shop_ids, date_from, date_to, period_step, data
 
 def normalize(resp, shop_map):
     rows = []
+    # Verwacht Vemcount-agent structuur
     data = resp.get("data", {})
     for _, shops in data.items():
+        if not isinstance(shops, dict): 
+            continue
         for sid, payload in shops.items():
-            meta = payload.get("meta", {})
-            dates = payload.get("dates", {})
+            dates = (payload or {}).get("dates", {})
             for ts, obj in dates.items():
                 rec = {"timestamp": ts, "shop_id": int(sid), "shop_name": shop_map.get(int(sid), str(sid))}
-                rec.update(obj.get("data", {}))
+                rec.update((obj or {}).get("data", {}))
                 rows.append(rec)
     df = pd.DataFrame(rows)
     if df.empty: return df
@@ -117,18 +118,18 @@ def normalize(resp, shop_map):
 # ========== KPI verrijking ==========
 def ensure_basics(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    # 1) Numeriek forceren
+    # 1) Numeriek forceren (voorkomt shape errors)
     for col in ["turnover","transactions","count_in","sales_per_visitor","conversion_rate","sq_meter"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
-    # 2) Conversie naar fractie (niet naar %)
+    # 2) Conversie naar fractie (niet in %)
     if "conversion_rate" in out.columns and not out["conversion_rate"].empty:
         if out["conversion_rate"].max() > 1.5:  # waarschijnlijk in %
             out["conversion_rate"] = out["conversion_rate"] / 100.0
     else:
         out["conversion_rate"] = out.get("transactions", 0.0) / (out.get("count_in", 0.0) + EPS)
     # 3) SPV & ATV
-    if "sales_per_visitor" not in out.columns or out["sales_per_visitor"].isna().all():
+    if ("sales_per_visitor" not in out.columns) or out["sales_per_visitor"].isna().all():
         out["sales_per_visitor"] = out.get("turnover", 0.0) / (out.get("count_in", 0.0) + EPS)
     out["atv"] = out.get("turnover", 0.0) / (out.get("transactions", 0.0) + EPS)
     return out
@@ -259,12 +260,14 @@ if analyze:
         st.info("Geen data voor de gekozen filters/periode.")
         st.stop()
 
-    # Verrijk KPI's en CSm²I
+    # ---- volgorde is belangrijk: eerst basics, dan CSm²I ----
     df = ensure_basics(df)
     df = add_csm2i(df, target_index=csm2i_target)
 
     # ===== 📐 CSm²I impact cards =====
     st.markdown("### 📐 CSm²I impact (per winkel)")
+    if "csm2i" not in df.columns:
+        st.warning("CSm²I kon niet berekend worden."); st.stop()
     csi_by_shop = df.groupby(["shop_id","shop_name"], dropna=False).agg(
         csi=("csm2i","mean"),
         uplift=("uplift_eur_csm","sum")
@@ -296,7 +299,7 @@ if analyze:
     actions = generate_actions(
         df,
         conv_target=conv_target_pct/100.0,
-        spv_uplift=spv_uplift_pct/100.0,  # <-- slider gebruikt
+        spv_uplift=spv_uplift_pct/100.0,  # slider gebruikt
         csm2i_target=csm2i_target
     )
     if actions.empty:
