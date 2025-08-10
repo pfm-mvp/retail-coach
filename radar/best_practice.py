@@ -1,4 +1,3 @@
-
 import pandas as pd
 
 def top_performers(df: pd.DataFrame, kpi: str = "sales_per_visitor", n: int = 5) -> pd.DataFrame:
