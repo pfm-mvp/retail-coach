@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+# --- Projectroot op pad zetten (één niveau boven /pages) ---
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -13,17 +14,34 @@ from radar.actions_engine import generate_actions
 from radar.best_practice import top_performers
 from radar.demographics import has_gender_data, gender_insights
 
+# --- ROBUST import van shop_mapping.py met fallback ---
+SHOP_NAME_MAP = {}
 try:
-    from shop_mapping import SHOP_ID_TO_NAME  # jouw bestand in root
+    from shop_mapping import SHOP_NAME_MAP as _MAP  # exact bestandsnaam/variabelenaam
+    if isinstance(_MAP, dict):
+        SHOP_NAME_MAP = _MAP
 except Exception:
-    SHOP_ID_TO_NAME = {}
+    # Hard fallback: laad handmatig vanaf pad (dekt edge-cases in Streamlit runner)
+    import importlib.util, pathlib
+    sm_path = pathlib.Path(ROOT) / "shop_mapping.py"
+    if sm_path.exists():
+        spec = importlib.util.spec_from_file_location("shop_mapping", sm_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore
+        SHOP_NAME_MAP = getattr(mod, "SHOP_NAME_MAP", {}) or {}
 
 st.set_page_config(page_title="Retail Performance Radar", page_icon="📊", layout="wide")
+
+# --- Forceer PFM-rode knop (alle st.button) ---
 st.markdown("""
 <style>
-    /* PFM rood button */
-    .pfm-red button {background-color:#F04438;color:white;border:0;border-radius:8px;}
-    .pfm-red button:hover {filter:brightness(0.95);}
+div.stButton > button {
+  background-color:#F04438 !important;
+  color:white !important;
+  border:0 !important;
+  border-radius:8px !important;
+}
+div.stButton > button:hover { filter: brightness(0.95); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,8 +78,8 @@ with c4:
 # Controls row 2 — multi‑select stores from mapping
 c5, c6 = st.columns([2, 1])
 with c5:
-    if SHOP_ID_TO_NAME:
-        opts = sorted([(name, sid) for sid, name in SHOP_ID_TO_NAME.items()], key=lambda x: x[0].lower())
+    if SHOP_NAME_MAP:
+        opts = sorted([(name, sid) for sid, name in SHOP_MAP_NAME.items()], key=lambda x: x[0].lower())
         names = [o[0] for o in opts]
         selected_names = st.multiselect("Selecteer winkels", names, default=names[:1])
         name_to_id = {name: sid for name, sid in opts}
@@ -97,8 +115,8 @@ if analyze:
         st.stop()
 
     # Map namen vanuit shop_mapping
-    if SHOP_ID_TO_NAME:
-        df["shop_name"] = df["shop_id"].map(SHOP_ID_TO_NAME).fillna(df.get("shop_name",""))
+    if SHOP_NAME_MAP:
+        df["shop_name"] = df["shop_id"].map(SHOP_NAME_MAP).fillna(df.get("shop_name",""))
 
     # Next Best Action
     st.markdown("### ✅ Next Best Action")
