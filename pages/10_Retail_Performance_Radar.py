@@ -79,7 +79,7 @@ with c4:
 c5, c6 = st.columns([2, 1])
 with c5:
     if SHOP_NAME_MAP:
-        opts = sorted([(name, sid) for sid, name in SHOP_MAP_NAME.items()], key=lambda x: x[0].lower())
+        opts = sorted([(name, sid) for sid, name in SHOP_NAME_MAP.items()], key=lambda x: x[0].lower())
         names = [o[0] for o in opts]
         selected_names = st.multiselect("Selecteer winkels", names, default=names[:1])
         name_to_id = {name: sid for name, sid in opts}
