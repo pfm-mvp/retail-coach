@@ -14,18 +14,20 @@ if ROOT not in sys.path:
 from radar.normalizer import normalize
 from radar.actions_engine import generate_actions
 from radar.best_practice import top_performers
-from radar.demographics import has_gender_data, gender_insights  # optioneel, we vragen geen demodata op
+from radar.demographics import has_gender_data, gender_insights  # optioneel; we vragen geen demodata op
 
 # ---------- Page config & styling ----------
 st.set_page_config(page_title="Retail Performance Radar", page_icon="📊", layout="wide")
 
-# ✅ Styling: paarse pills & rode knop (jouw CSS)
+# ✅ Styling: paarse pills & rode knop
 st.markdown(
     """
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
     html, body, [class*="css"] { font-family: 'Instrument Sans', sans-serif !important; }
+    /* 🎨 Multiselect pills in paars */
     [data-baseweb="tag"] { background-color: #9E77ED !important; color: white !important; }
+    /* 🔴 "Analyseer" knop in PFM-rood */
     button[data-testid="stBaseButton-secondary"] {
         background-color: #F04438 !important; color: white !important;
         border-radius: 16px !important; font-weight: 600 !important;
@@ -33,7 +35,9 @@ st.markdown(
         padding: 0.6rem 1.4rem !important; border: none !important; box-shadow: none !important;
         transition: background-color 0.2s ease-in-out;
     }
-    button[data-testid="stBaseButton-secondary"]:hover { background-color: #d13c30 !important; cursor: pointer; }
+    button[data-testid="stBaseButton-secondary"]:hover {
+        background-color: #d13c30 !important; cursor: pointer;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -114,23 +118,26 @@ if not API_URL:
     st.warning("Stel `API_URL` in via **.streamlit/secrets.toml** (bijv. https://…/get-report).")
     st.stop()
 
-# ---------- Inline fetch: POST DIRECT naar API_URL met data[] en data_output[] ----------
+# ---------- Inline fetch: POST met herhaalde data & data_output ----------
 def fetch_report_inline(api_url: str, shop_ids, data_outputs, date_from: str, date_to: str, period_step: str = "day", timeout: int = 60):
     if not shop_ids:
         raise ValueError("shop_ids empty")
     if not data_outputs:
         raise ValueError("data_outputs empty")
 
-    params = {
-        "source": "shops",
-        "period": "date",
-        "form_date_from": date_from,
-        "form_date_to": date_to,
-        "period_step": period_step,
-        # let op []-sleutels
-        "data[]": [int(s) for s in shop_ids],
-        "data_output[]": list(data_outputs),
-    }
+    # Belangrijk: herhaalde parameters i.p.v. []-syntax
+    params = [
+        ("source", "shops"),
+        ("period", "date"),
+        ("form_date_from", date_from),
+        ("form_date_to", date_to),
+        ("period_step", period_step),
+    ]
+    for sid in shop_ids:
+        params.append(("data", int(sid)))
+    for out in data_outputs:
+        params.append(("data_output", out))
+
     r = requests.post(api_url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
