@@ -1,5 +1,6 @@
 # pages/10_Retail_Performance_Radar.py
 import os, sys, datetime as dt
+import requests
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -10,11 +11,59 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 # ---------- Imports uit radar/ ----------
-from radar.data_client import fetch_report
 from radar.normalizer import normalize
 from radar.actions_engine import generate_actions
 from radar.best_practice import top_performers
+# Demografie is optioneel; sectie toont alleen iets als er data is (we vragen het nu niet op)
 from radar.demographics import has_gender_data, gender_insights
+
+# ---------- Page config & styling ----------
+st.set_page_config(page_title="Retail Performance Radar", page_icon="📊", layout="wide")
+
+# ✅ Styling: paarse pills & rode knop (zoals aangeleverd)
+st.markdown(
+    """
+    <style>
+    /* Font import (optioneel) */
+    @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
+
+    /* Forceer Instrument Sans als standaard font */
+    html, body, [class*="css"] {
+        font-family: 'Instrument Sans', sans-serif !important;
+    }
+
+    /* 🎨 Multiselect pills in paars */
+    [data-baseweb="tag"] {
+        background-color: #9E77ED !important;
+        color: white !important;
+    }
+
+    /* 🔴 "Analyseer" knop in PFM-rood */
+    button[data-testid="stBaseButton-secondary"] {
+        background-color: #F04438 !important;
+        color: white !important;
+        border-radius: 16px !important;
+        font-weight: 600 !important;
+        font-family: "Instrument Sans", sans-serif !important;
+        padding: 0.6rem 1.4rem !important;
+        border: none !important;
+        box-shadow: none !important;
+        transition: background-color 0.2s ease-in-out;
+    }
+
+    button[data-testid="stBaseButton-secondary"]:hover {
+        background-color: #d13c30 !important;
+        cursor: pointer;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown("## 📊 Retail Performance Radar")
+st.caption("Next Best Action • Best Practice Finder • (optioneel) Demografiepatronen")
+
+PFM_PURPLE = "#762181"
 
 # ---------- Shop mapping: jouw SHOP_NAME_MAP (id -> naam) ----------
 SHOP_ID_TO_NAME, NAME_TO_ID = {}, {}
@@ -37,23 +86,6 @@ else:
     SHOP_ID_TO_NAME = {}
 
 NAME_TO_ID = {name: sid for sid, name in SHOP_ID_TO_NAME.items()}
-
-# ---------- Inputs: rij 2 (shops) ----------
-if NAME_TO_ID:
-    names = sorted(NAME_TO_ID.keys(), key=lambda s: s.lower())
-    selected_names = st.multiselect("Selecteer winkels", names, default=names[:1], key="shop_selector")
-    shop_ids = [NAME_TO_ID[n] for n in selected_names]
-else:
-    st.warning("Geen geldige shops gevonden in shop_mapping.py (verwacht: SHOP_NAME_MAP = {id:int: 'Naam':str}).")
-    shop_ids = []
-
-# ---------- Analyseer-knop (links, onder inputs) ----------
-analyze = st.button("🔍 Analyseer", key="analyze_button")
-
-st.markdown("## 📊 Retail Performance Radar")
-st.caption("Next Best Action • Best Practice Finder • (optioneel) Demografiepatronen")
-
-PFM_PURPLE = "#762181"
 
 # ---------- Inputs: rij 1 ----------
 c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.0, 1.0])
@@ -83,20 +115,15 @@ with c4:
 
 # ---------- Inputs: rij 2 (shops) ----------
 if NAME_TO_ID:
-    names = sorted(NAME_TO_ID.keys(), key=str.lower)
-    selected_names = st.multiselect("Selecteer winkels", names, default=names[:1])
+    names = sorted(NAME_TO_ID.keys(), key=lambda s: s.lower())
+    selected_names = st.multiselect("Selecteer winkels", names, default=names[:1], key="shop_selector")
     shop_ids = [NAME_TO_ID[n] for n in selected_names]
-elif SHOP_ID_TO_NAME:
-    opts = sorted([(name, sid) for sid, name in SHOP_ID_TO_NAME.items()], key=lambda x: x[0].lower())
-    selected_names = st.multiselect("Selecteer winkels", [o[0] for o in opts],
-                                    default=[opts[0][0]] if opts else [])
-    shop_ids = [dict(opts)[n] for n in selected_names] if selected_names else []
 else:
-    st.warning("Geen shops gevonden in **shop_mapping.py**. Gebruik `SHOP_NAME_MAP` of `SHOP_ID_TO_NAME`.")
+    st.warning("Geen geldige shops gevonden in shop_mapping.py (verwacht: SHOP_NAME_MAP = {id:int: 'Naam':str}).")
     shop_ids = []
 
 # ---------- Analyseer-knop (links, onder inputs) ----------
-analyze = st.button("🔍 Analyseer")
+analyze = st.button("🔍 Analyseer", key="analyze_button", type="secondary")
 
 # ---------- Debug ----------
 with st.expander("🛠️ Debug"):
@@ -108,21 +135,45 @@ if not API_URL:
     st.warning("Stel `API_URL` in via **.streamlit/secrets.toml** (bijv. https://…/get-report).")
     st.stop()
 
+# ---------- Inline fetch: post DIRECT naar API_URL (geen /get-report toevoegen) ----------
+def fetch_report_inline(api_url: str, shop_ids, data_outputs, date_from: str, date_to: str, period_step: str = "day", timeout: int = 60):
+    if not shop_ids:
+        raise ValueError("shop_ids empty")
+    if not data_outputs:
+        raise ValueError("data_outputs empty")
+
+    params = {
+        "source": "shops",
+        "period": "date",
+        "form_date_from": date_from,
+        "form_date_to": date_to,
+        "period_step": period_step,
+    }
+    for sid in shop_ids:
+        params.setdefault("data", []).append(int(sid))
+    for out in data_outputs:
+        params.setdefault("data_output", []).append(out)
+
+    # Belangrijk: direct posten naar api_url zoals in secrets staat
+    r = requests.post(api_url, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
 # ---------- Run analyse ----------
 if analyze:
     if not shop_ids:
         st.info("Selecteer minimaal één winkel.")
         st.stop()
 
+    # VRAAG GEEN DEMOGRAFIE OP in deze call (per jouw verzoek)
     outs = [
         "count_in", "transactions", "turnover",
         "conversion_rate", "sales_per_visitor", "sqm_meter",
-        "demographics_gender_male", "demographics_gender_female",
     ]
 
     with st.spinner("Analyseren…"):
         try:
-            resp = fetch_report(
+            resp = fetch_report_inline(
                 api_url=API_URL,
                 shop_ids=shop_ids,
                 data_outputs=outs,
@@ -139,7 +190,7 @@ if analyze:
         st.info("Geen data voor de gekozen filters/periode.")
         st.stop()
 
-    # Namen mappen (werkt voor beide varianten)
+    # Namen mappen
     if SHOP_ID_TO_NAME:
         df["shop_name"] = df["shop_id"].map(SHOP_ID_TO_NAME).fillna(df.get("shop_name", ""))
 
@@ -179,10 +230,13 @@ if analyze:
     if top.empty:
         st.info("Onvoldoende data voor Best Practices.")
     else:
-        st.dataframe(top.rename(columns={"sales_per_visitor_avg": "SPV (gem)"}),
-                     use_container_width=True)
+        st.dataframe(
+            top.rename(columns={"sales_per_visitor_avg": "SPV (gem)"}),
+            use_container_width=True
+        )
 
-    # ---------- Demografie (alleen tonen als er data is) ----------
+    # ---------- Demografie (optioneel) ----------
+    # We vroegen géén demographics op; sectie toont alleen iets als je elders merge't met genderdata.
     if has_gender_data(df):
         st.markdown("### 👥 Demografiepatronen (optioneel)")
         gi = gender_insights(df, top_n=3)
