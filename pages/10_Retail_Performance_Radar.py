@@ -119,16 +119,26 @@ def normalize(resp, shop_map):
 # ========== KPI verrijking ==========
 def ensure_basics(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    # Zorg dat CRM velden logisch zijn
-    if "conversion_rate" in out.columns:
-        cr = pd.to_numeric(out["conversion_rate"], errors="coerce").fillna(0.0)
-        out["conversion_rate"] = cr/100.0 if cr.max() > 1.5 else cr
+
+    # 1) Alles wat we rekenen eerst numeriek maken
+    for col in ["turnover", "transactions", "count_in", "sales_per_visitor", "conversion_rate", "sq_meter"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+
+    # 2) Conversie normaliseren (API kan % of fractie leveren)
+    if "conversion_rate" in out.columns and not out["conversion_rate"].empty:
+        # Als max > 1.5 dan is het waarschijnlijk in %
+        out["conversion_rate"] = out["conversion_rate"].where(out["conversion_rate"].max() <= 1.5,
+                                                             out["conversion_rate"] / 100.0)
     else:
-        out["conversion_rate"] = out.get("transactions",0) / (out.get("count_in",0) + EPS)
-    if "sales_per_visitor" not in out.columns:
-        out["sales_per_visitor"] = out.get("turnover",0) / (out.get("count_in",0) + EPS)
-    if "atv" not in out.columns:
-        out["atv"] = out.get("turnover",0) / (out.get("transactions",0) + EPS)
+        out["conversion_rate"] = out.get("transactions", 0.0) / (out.get("count_in", 0.0) + EPS)
+
+    # 3) SPV en ATV berekenen (of herberekenen, nu de inputs numeriek zijn)
+    if "sales_per_visitor" not in out.columns or (out["sales_per_visitor"].isna().all()):
+        out["sales_per_visitor"] = out.get("turnover", 0.0) / (out.get("count_in", 0.0) + EPS)
+
+    out["atv"] = out.get("turnover", 0.0) / (out.get("transactions", 0.0) + EPS)
+
     return out
 
 def add_csm2i(df: pd.DataFrame, target_index: float = 1.0) -> pd.DataFrame:
