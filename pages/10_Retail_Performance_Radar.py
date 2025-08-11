@@ -253,7 +253,69 @@ if analyze:
         unsafe_allow_html=True
     )
 
-    # ===== Scatter: SPV vs Sales per m² (kleur = CSm²I t.o.v. target) =====
+    # --- EXTRA ruimte + oranje total widget (PFM oranje) ---
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    total_eur = agg["uplift_total"].sum() if "uplift_total" in agg.columns else (agg.get("uplift_csm", pd.Series()).sum() + agg.get("uplift_conv", pd.Series()).sum())
+    st.markdown(
+        f"""
+        <div style="
+            margin: 6px 0 18px 0;
+            padding: 16px 18px;
+            background: #FEAC76;
+            border-radius: 12px;
+            border: 1px solid rgba(0,0,0,0.06);
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        ">
+          <div style="font-weight:700; font-size:15px; margin-bottom:6px;">💰 Total extra potential in revenue</div>
+          <div style="font-size:26px; font-weight:800; line-height:1;" class="eur">{fmt_eur(total_eur)}</div>
+          <div style="opacity:.85; margin-top:4px;">
+            Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --- Aanbevelingen per winkel (cards) ---
+    st.markdown("## 🔎 CSm²I impact (per winkel)")
+    cards = df.groupby(["shop_id","shop_name"]).agg(
+        visitors=("count_in","sum"),
+        actual_spv=("actual_spv","mean"),
+        uplift_csm=("uplift_eur_csm","sum"),
+        uplift_conv=("uplift_eur_conv","sum"),
+    ).reset_index()
+    cards["csm2i_current"] = cards["actual_spv"] / (float(ref_spv) + EPS)
+    cards["uplift_total"]  = cards["uplift_csm"] + cards["uplift_conv"]
+
+    def eur0(x): return ("€{:,.0f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X",".")
+    def idx2(v):  return f"{v:.2f}".replace(".", ",")
+
+    for _, r in cards.sort_values("uplift_total", ascending=False).iterrows():
+        ok = float(r["csm2i_current"]) >= float(csm2i_target)
+        badge = "🟢" if ok else "🟠"
+        st.markdown(
+            f"""
+            <div style="border:1px solid #eee; border-radius:12px; padding:16px; margin:10px 0; background:#fff;">
+              <div style="font-weight:700; font-size:20px; margin-bottom:8px;">{r['shop_name']}</div>
+              <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+                <div>
+                  <div style="opacity:.75; font-size:14px; margin-bottom:4px;">CSm²I huidig vs target</div>
+                  <div style="font-weight:800; font-size:26px;">
+                    {idx2(r['csm2i_current'])} / {idx2(float(csm2i_target))}
+                    <span style="margin-left:8px;">{badge}</span>
+                  </div>
+                </div>
+                <div>
+                  <div style="opacity:.75; font-size:14px; margin-bottom:4px;">Potentiële uplift</div>
+                  <div style="font-weight:800; font-size:26px;" class="eur">{eur0(r['uplift_total'])}</div>
+                </div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    # ===== Scatter (laatste visual): SPV vs Sales per m² =====
     rad = df.groupby(["shop_id", "shop_name"]).agg(
         spv=("actual_spv", "mean"),
         spsqm=("actual_spsqm", "mean"),
@@ -261,7 +323,6 @@ if analyze:
         visitors=("count_in", "sum"),
     ).reset_index()
 
-    # Bubbelgrootte: uplift_total (indien aanwezig) anders bezoekers
     if "uplift_total" in agg.columns:
         size_series = agg.set_index("shop_id")["uplift_total"]
         rad["size_metric"] = rad["shop_id"].map(size_series).fillna(0.0)
@@ -276,7 +337,6 @@ if analyze:
             lambda v: "{:,.0f}".format(v).replace(",", ".")
         )
 
-    # Band t.o.v. target (±5%)
     low_thr  = float(csm2i_target) * 0.95
     high_thr = float(csm2i_target) * 1.05
     rad["csm2i_band"] = np.select(
@@ -285,7 +345,6 @@ if analyze:
         default="Rond target",
     )
 
-    # Hover‑velden expliciet en in vaste volgorde (voorkomt %{customdata[..]} ellende)
     rad["hover_spv"]   = rad["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
     rad["hover_spsqm"] = rad["spsqm"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
     rad["hover_csi"]   = rad["csi"].round(2).map(lambda v: str(v).replace(".", ","))
@@ -293,7 +352,6 @@ if analyze:
     color_map  = {"Onder target": "#F04438", "Rond target": "#F59E0B", "Boven target": "#16A34A"}
     symbol_map = {"Onder target": "diamond", "Rond target": "circle", "Boven target": "square"}
 
-    # Alleen deze 4 custom velden meegeven, in vaste volgorde
     scatter = px.scatter(
         rad,
         x="spv", y="spsqm", size="size_metric",
@@ -302,8 +360,6 @@ if analyze:
         hover_data=["hover_spv", "hover_spsqm", "hover_csi", "hover_size"],
         labels={"spv": "Sales per Visitor", "spsqm": "Sales per m²", "csm2i_band": "CSm²I t.o.v. target"},
     )
-
-    # customdata indices nu altijd 0..3 (in de volgorde hierboven)
     scatter.update_traces(
         hovertemplate="<b>%{text}</b><br>" +
                       "SPV: %{customdata[0]}<br>" +
@@ -312,7 +368,6 @@ if analyze:
                       f"{size_label}: " + "%{customdata[3]}<extra></extra>",
         text=rad["shop_name"],
     )
-
     scatter.update_layout(
         margin=dict(l=20, r=20, t=10, b=10),
         height=560,
@@ -320,7 +375,6 @@ if analyze:
         xaxis=dict(title="Sales per Visitor (€/bezoeker)", tickformat=",.2f"),
         yaxis=dict(title="Sales per m² (€/m²)", tickformat=",.2f"),
     )
-
     st.plotly_chart(scatter, use_container_width=True)
 
     # ===== Debug (optioneel inklapbaar)
