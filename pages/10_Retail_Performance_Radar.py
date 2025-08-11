@@ -176,7 +176,31 @@ if run:
     mode = "benchmark" if use_benchmark else "portfolio"   # keuze 1B
     bm_id = NAME_TO_ID.get(bm_name) if (use_benchmark and bm_name) else None
     ref_spv = choose_ref_spv(df, mode=mode, benchmark_shop_id=bm_id, uplift_pct=spv_uplift_pct/100.0)
-    df = compute_csm2i_and_uplift(df, ref_spv=ref_spv, csm2i_target=csm2i_target)
+    def choose_ref_spv(df: pd.DataFrame, mode="portfolio", benchmark_shop_id=None, manual_spv=None, uplift_pct=0.0):
+    safe = df.copy()
+
+    # Hard coerce naar numeriek zodat sommen/delingen niet crashen
+    for c in ["turnover", "count_in", "shop_id"]:
+        if c in safe.columns:
+            safe[c] = pd.to_numeric(safe[c], errors="coerce").fillna(0.0)
+        else:
+            safe[c] = 0.0
+
+    def spv_of(frame: pd.DataFrame) -> float:
+        visitors = float(frame["count_in"].sum())
+        turnover = float(frame["turnover"].sum())
+        return 0.0 if visitors <= 0 else turnover / (visitors + EPS)
+
+    if mode == "benchmark" and benchmark_shop_id is not None and int(benchmark_shop_id) in safe["shop_id"].astype(int).values:
+        sub = safe[safe["shop_id"].astype(int) == int(benchmark_shop_id)]
+        base = spv_of(sub)
+    elif mode == "manual" and manual_spv is not None:
+        base = float(manual_spv)
+    else:
+        base = spv_of(safe)
+
+    base = max(0.0, float(base))
+    return base * (1.0 + float(uplift_pct))
 
     # ==== KPI/impact cards ====
     st.markdown("### 📐 CSm²I impact (per winkel)")
