@@ -54,7 +54,6 @@ st.caption("Next Best Action • Best Practice Finder • (optioneel) Demografie
 # =========================
 EPS = 1e-9
 DEFAULT_SQ_METER = 1.0
-WEEK_ORDER = ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"]  # volgorde in heatmap
 
 def fmt_eur(x: float) -> str:
     try:
@@ -67,6 +66,12 @@ def fmt_eur2(x: float) -> str:
         return ("€{:,.2f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X",".")
     except Exception:
         return "€0,00"
+
+def fmt_pct(x: float) -> str:
+    try:
+        return f"{float(x)*100:.1f}%"
+    except Exception:
+        return "0,0%"
 
 def coerce_numeric(df, cols):
     out = df.copy()
@@ -208,75 +213,10 @@ def normalize_resp(resp):
                 rec.update((obj or {}).get("data", {}))
                 rows.append(rec)
     df = pd.DataFrame(rows)
-    if df.empty:
-        return df
+    if df.empty: return df
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    df["date"] = ts.dt.date
-    df["hour"] = ts.dt.hour
-    # weekdag (0=Ma) + NL korte naam
-    df["weekday_idx"] = ts.dt.dayofweek
-    nl = {0:"Ma",1:"Di",2:"Wo",3:"Do",4:"Vr",5:"Za",6:"Zo"}
-    df["weekday"] = df["weekday_idx"].map(nl)
+    df["date"] = ts.dt.date; df["hour"] = ts.dt.hour
     return df
-
-# =========================
-# Heatmap helper (samenvatting over alle geselecteerde winkels)
-# =========================
-def render_hour_heatmap(frame: pd.DataFrame, value_col: str, title: str, is_pct: bool=False):
-    """
-    frame: verwacht kolommen ['weekday','hour', value_col]
-    """
-    if frame.empty:
-        return
-
-    # orden rijen/kolommen
-    hours = list(range(0,24))
-    dfp = (
-        frame.groupby(["weekday","hour"], as_index=False)[value_col]
-        .mean()
-        .pivot(index="weekday", columns="hour", values=value_col)
-        .reindex(index=WEEK_ORDER)
-        .reindex(columns=hours, fill_value=np.nan)
-    )
-
-    # labels
-    if is_pct:
-        text = dfp.applymap(lambda v: "" if pd.isna(v) else f"{v*100:,.0f}%".replace(",", "."))
-        z = dfp.values
-        hover_tmpl = "%{y} • %{x}: %{z:.2%}"
-        colorscale = "YlOrRd"
-    else:
-        text = dfp.applymap(lambda v: "" if pd.isna(v) else fmt_eur2(v))
-        z = dfp.values
-        hover_tmpl = "%{y} • %{x}: %{customdata}"
-        colorscale = "YlOrRd"
-
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z,
-            x=list(dfp.columns),
-            y=list(dfp.index),
-            colorscale=colorscale,
-            colorbar=dict(title=("%" if is_pct else "€")),
-            hovertemplate=hover_tmpl,
-            customdata=text.values if not is_pct else None
-        )
-    )
-    # waarden ook als tekst tonen voor snelle scan
-    fig.update_traces(
-        text=text.values,
-        texttemplate="%{text}",
-        textfont=dict(size=10),
-        showscale=True
-    )
-    fig.update_layout(
-        title=title,
-        xaxis=dict(title="Uur van de dag", dtick=1),
-        yaxis=dict(title="Weekdag"),
-        margin=dict(l=20,r=20,t=40,b=20),
-        height=420
-    )
-    st.plotly_chart(fig, use_container_width=True)
 
 # =========================
 # RUN
@@ -455,6 +395,7 @@ if analyze:
             badge = '<span class="badge badge-amber">🟠 rond target</span>'
 
         # vergelijk t.o.v. beste SPV
+        spv_gap = best_spv - spv_store
         spv_comp = f"{fmt_eur2(spv_store)} vs best {fmt_eur2(best_spv)}" if best_spv > 0 else fmt_eur2(spv_store)
 
         st.markdown(f"### {name} {badge}", unsafe_allow_html=True)
@@ -472,59 +413,116 @@ if analyze:
             bullets.append("CSm²I onder target → plan **upsell/cross‑sell** & coach op verkooproutine (SPV).")
         if conv_store < conv_target:
             bullets.append("Conversie onder doel → **extra bezetting** op piekuren & **actie bij instap**.")
-        if (best_spv - spv_store) > 0.1:
-            bullets.append(f"SPV achter op best practice → leer van **win‑store** en test bundels/upsell.")
+        if spv_gap > 0.1:
+            bullets.append(f"SPV {fmt_eur2(spv_store)} < best {fmt_eur2(best_spv)} → leer van **best practice** winkel.")
         if not bullets:
             bullets.append("Presteert op of boven target → **vasthouden** en best practices delen.")
         for b in bullets:
             st.write(f"- {b}")
         st.markdown("---")
 
-    # ===== Uur‑drilldown (per winkel) + samenvattende heatmaps =====
+    # ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) — HEATMAP =====
     if step == "hour":
-        st.markdown("## Uur‑profielen (drill‑down)")
+        st.markdown("## Uur‑overzicht per winkel (gemiddeld over dagen)")
         for sid, name in [(int(r["shop_id"]), r["shop_name"]) for _, r in agg.iterrows()]:
             sub = df[df["shop_id"] == sid].copy()
             if sub.empty:
                 continue
             sub = normalize_kpis(sub)
-            sub = sub.groupby("hour").agg(
-                visitors=("count_in","sum"),
+            # Gemiddelde per uur over alle dagen
+            hourly = sub.groupby("hour").agg(
+                visitors=("count_in","mean"),
                 spv=("sales_per_visitor","mean"),
                 conv=("conversion_rate","mean")
             ).reset_index().sort_values("hour")
-            with st.expander(f"⏱️ {name} — uurprofiel"):
-                fig = go.Figure()
-                fig.add_trace(go.Bar(x=sub["hour"], y=sub["visitors"], name="Bezoekers", yaxis="y2", opacity=0.3))
-                fig.add_trace(go.Scatter(x=sub["hour"], y=sub["spv"], name="SPV (€)", mode="lines+markers"))
-                fig.add_trace(go.Scatter(x=sub["hour"], y=sub["conv"]*100, name="Conversie (%)", mode="lines+markers"))
+
+            with st.expander(f"⏱️ {name} — uurprofiel (heatmap)"):
+                metric = st.selectbox(
+                    "Kleur op basis van", 
+                    ["SPV (€)", "Conversie (%)", "Bezoekers"], 
+                    index=0, key=f"metric_{sid}"
+                )
+
+                # Data & kleurinstellingen
+                x_hours = hourly["hour"].tolist()
+                # 2D array met één rij voor heatmap
+                if metric.startswith("SPV"):
+                    z_vals = [hourly["spv"].tolist()]
+                    # eigen schaal: rood (laag) -> oranje (rond ref) -> groen (hoog)
+                    # centeren rondom ref_spv
+                    vmin = float(hourly["spv"].min())
+                    vmax = float(hourly["spv"].max())
+                    vmid = float(ref_spv) if ref_spv > 0 else (vmin + vmax) / 2
+                    colorscale = [
+                        [0.0, "#F04438"],  # rood
+                        [0.5, "#F59E0B"],  # oranje
+                        [1.0, "#16A34A"],  # groen
+                    ]
+                    zmin, zmax = vmin, vmax
+                    zmid = vmid
+                    colorbar_title = "SPV (€)"
+                elif metric.startswith("Conversie"):
+                    z_vals = [(hourly["conv"]*100).tolist()]
+                    vmin = float((hourly["conv"]*100).min())
+                    vmax = float((hourly["conv"]*100).max())
+                    vmid = float(conv_goal_pct)
+                    colorscale = [
+                        [0.0, "#F04438"],
+                        [0.5, "#F59E0B"],
+                        [1.0, "#16A34A"],
+                    ]
+                    zmin, zmax = vmin, vmax
+                    zmid = vmid
+                    colorbar_title = "Conversie (%)"
+                else:
+                    z_vals = [hourly["visitors"].tolist()]
+                    colorscale = "Viridis"
+                    zmin = float(hourly["visitors"].min())
+                    zmax = float(hourly["visitors"].max())
+                    zmid = None
+                    colorbar_title = "Bezoekers"
+
+                # Tooltiptekst met alle KPI's
+                hovertext = []
+                for i, hr in enumerate(x_hours):
+                    spv_v = hourly.loc[hourly["hour"] == hr, "spv"].values[0]
+                    conv_v = hourly.loc[hourly["hour"] == hr, "conv"].values[0]
+                    vis_v = hourly.loc[hourly["hour"] == hr, "visitors"].values[0]
+                    hovertext.append(
+                        f"Uur: {hr}:00<br>"
+                        f"SPV: {fmt_eur2(spv_v)}<br>"
+                        f"Conversie: {conv_v*100:.1f}%<br>"
+                        f"Bezoekers: {int(round(vis_v))}"
+                    )
+                hovertext = [hovertext]  # 2D
+
+                heat = go.Heatmap(
+                    z=z_vals,
+                    x=x_hours,
+                    y=["gemiddeld"],
+                    colorscale=colorscale,
+                    zmin=zmin, zmax=zmax,
+                    zmid=zmid if zmid is not None else None,
+                    colorbar=dict(title=colorbar_title),
+                    hoverinfo="text",
+                    text=hovertext
+                )
+                fig = go.Figure(data=[heat])
                 fig.update_layout(
-                    height=360, margin=dict(l=20,r=20,t=10,b=10),
-                    xaxis=dict(title="Uur"),
-                    yaxis=dict(title="SPV (€) / Conversie (%)", rangemode="tozero"),
-                    yaxis2=dict(title="Bezoekers", overlaying="y", side="right", rangemode="tozero"),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+                    height=280,
+                    margin=dict(l=20, r=20, t=10, b=10),
+                    xaxis=dict(title="Uur", dtick=1),
+                    yaxis=dict(title="", showticklabels=False),
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ---------- Samenvattende heatmap (alle geselecteerde winkels) ----------
-        st.markdown("## 🔥 Heatmap (alle geselecteerde winkels)")
-        # zorg dat basis‑kolommen aanwezig & numeriek zijn
-        base = normalize_kpis(df.copy())
-        # SPV‑heatmap (gemiddelde SPV per weekdag/uur)
-        render_hour_heatmap(
-            base[["weekday","hour","sales_per_visitor"]].rename(columns={"sales_per_visitor":"value"}),
-            value_col="value",
-            title="Sales per Visitor (€) — gemiddelde per weekdag × uur",
-            is_pct=False
-        )
-        # Conversie‑heatmap (gemiddelde conversie per weekdag/uur)
-        render_hour_heatmap(
-            base[["weekday","hour","conversion_rate"]].rename(columns={"conversion_rate":"value"}),
-            value_col="value",
-            title="Conversie (%) — gemiddelde per weekdag × uur",
-            is_pct=True
-        )
+                # Tabel onder de heatmap
+                table = hourly.copy()
+                table["SPV (€)"] = table["spv"].apply(fmt_eur2)
+                table["Conversie (%)"] = (table["conv"]*100).map(lambda v: f"{v:.1f}%")
+                table["Bezoekers"] = table["visitors"].round(0).astype(int)
+                table = table[["hour","SPV (€)","Conversie (%)","Bezoekers"]].rename(columns={"hour":"Uur"})
+                st.dataframe(table, use_container_width=True, hide_index=True)
 
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
