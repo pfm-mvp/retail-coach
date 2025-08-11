@@ -54,6 +54,7 @@ st.caption("Next Best Action • Best Practice Finder • (optioneel) Demografie
 # =========================
 EPS = 1e-9
 DEFAULT_SQ_METER = 1.0
+WEEK_ORDER = ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"]  # volgorde in heatmap
 
 def fmt_eur(x: float) -> str:
     try:
@@ -207,10 +208,75 @@ def normalize_resp(resp):
                 rec.update((obj or {}).get("data", {}))
                 rows.append(rec)
     df = pd.DataFrame(rows)
-    if df.empty: return df
+    if df.empty:
+        return df
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    df["date"] = ts.dt.date; df["hour"] = ts.dt.hour
+    df["date"] = ts.dt.date
+    df["hour"] = ts.dt.hour
+    # weekdag (0=Ma) + NL korte naam
+    df["weekday_idx"] = ts.dt.dayofweek
+    nl = {0:"Ma",1:"Di",2:"Wo",3:"Do",4:"Vr",5:"Za",6:"Zo"}
+    df["weekday"] = df["weekday_idx"].map(nl)
     return df
+
+# =========================
+# Heatmap helper (samenvatting over alle geselecteerde winkels)
+# =========================
+def render_hour_heatmap(frame: pd.DataFrame, value_col: str, title: str, is_pct: bool=False):
+    """
+    frame: verwacht kolommen ['weekday','hour', value_col]
+    """
+    if frame.empty:
+        return
+
+    # orden rijen/kolommen
+    hours = list(range(0,24))
+    dfp = (
+        frame.groupby(["weekday","hour"], as_index=False)[value_col]
+        .mean()
+        .pivot(index="weekday", columns="hour", values=value_col)
+        .reindex(index=WEEK_ORDER)
+        .reindex(columns=hours, fill_value=np.nan)
+    )
+
+    # labels
+    if is_pct:
+        text = dfp.applymap(lambda v: "" if pd.isna(v) else f"{v*100:,.0f}%".replace(",", "."))
+        z = dfp.values
+        hover_tmpl = "%{y} • %{x}: %{z:.2%}"
+        colorscale = "YlOrRd"
+    else:
+        text = dfp.applymap(lambda v: "" if pd.isna(v) else fmt_eur2(v))
+        z = dfp.values
+        hover_tmpl = "%{y} • %{x}: %{customdata}"
+        colorscale = "YlOrRd"
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=list(dfp.columns),
+            y=list(dfp.index),
+            colorscale=colorscale,
+            colorbar=dict(title=("%" if is_pct else "€")),
+            hovertemplate=hover_tmpl,
+            customdata=text.values if not is_pct else None
+        )
+    )
+    # waarden ook als tekst tonen voor snelle scan
+    fig.update_traces(
+        text=text.values,
+        texttemplate="%{text}",
+        textfont=dict(size=10),
+        showscale=True
+    )
+    fig.update_layout(
+        title=title,
+        xaxis=dict(title="Uur van de dag", dtick=1),
+        yaxis=dict(title="Weekdag"),
+        margin=dict(l=20,r=20,t=40,b=20),
+        height=420
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 # =========================
 # RUN
@@ -389,7 +455,6 @@ if analyze:
             badge = '<span class="badge badge-amber">🟠 rond target</span>'
 
         # vergelijk t.o.v. beste SPV
-        spv_gap = best_spv - spv_store
         spv_comp = f"{fmt_eur2(spv_store)} vs best {fmt_eur2(best_spv)}" if best_spv > 0 else fmt_eur2(spv_store)
 
         st.markdown(f"### {name} {badge}", unsafe_allow_html=True)
@@ -407,15 +472,15 @@ if analyze:
             bullets.append("CSm²I onder target → plan **upsell/cross‑sell** & coach op verkooproutine (SPV).")
         if conv_store < conv_target:
             bullets.append("Conversie onder doel → **extra bezetting** op piekuren & **actie bij instap**.")
-        if spv_gap > 0.1:
-            bullets.append(f"SPV {fmt_eur2(spv_store)} < best {fmt_eur2(best_spv)} → leer van **best practice** winkel.")
+        if (best_spv - spv_store) > 0.1:
+            bullets.append(f"SPV achter op best practice → leer van **win‑store** en test bundels/upsell.")
         if not bullets:
             bullets.append("Presteert op of boven target → **vasthouden** en best practices delen.")
         for b in bullets:
             st.write(f"- {b}")
         st.markdown("---")
 
-    # ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
+    # ===== Uur‑drilldown (per winkel) + samenvattende heatmaps =====
     if step == "hour":
         st.markdown("## Uur‑profielen (drill‑down)")
         for sid, name in [(int(r["shop_id"]), r["shop_name"]) for _, r in agg.iterrows()]:
@@ -441,6 +506,25 @@ if analyze:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
                 st.plotly_chart(fig, use_container_width=True)
+
+        # ---------- Samenvattende heatmap (alle geselecteerde winkels) ----------
+        st.markdown("## 🔥 Heatmap (alle geselecteerde winkels)")
+        # zorg dat basis‑kolommen aanwezig & numeriek zijn
+        base = normalize_kpis(df.copy())
+        # SPV‑heatmap (gemiddelde SPV per weekdag/uur)
+        render_hour_heatmap(
+            base[["weekday","hour","sales_per_visitor"]].rename(columns={"sales_per_visitor":"value"}),
+            value_col="value",
+            title="Sales per Visitor (€) — gemiddelde per weekdag × uur",
+            is_pct=False
+        )
+        # Conversie‑heatmap (gemiddelde conversie per weekdag/uur)
+        render_hour_heatmap(
+            base[["weekday","hour","conversion_rate"]].rename(columns={"conversion_rate":"value"}),
+            value_col="value",
+            title="Conversie (%) — gemiddelde per weekdag × uur",
+            is_pct=True
+        )
 
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
