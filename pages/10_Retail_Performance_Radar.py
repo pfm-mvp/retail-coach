@@ -277,43 +277,84 @@ if analyze:
     )
 
     # --- Aanbevelingen per winkel (cards) ---
-    st.markdown("## 🔎 CSm²I impact (per winkel)")
-    cards = df.groupby(["shop_id","shop_name"]).agg(
+    st.markdown("## 🔎 Aanbevelingen per winkel")
+
+    store_stats = df.groupby(["shop_id","shop_name"]).agg(
         visitors=("count_in","sum"),
-        actual_spv=("actual_spv","mean"),
+        sqm=("sq_meter","mean"),
+        atv=("atv","mean"),
+        conv=("conversion_rate","mean"),
+        spv=("actual_spv","mean"),
+        spsqm=("actual_spsqm","mean"),
+        expected_spsqm=("expected_spsqm","mean"),
         uplift_csm=("uplift_eur_csm","sum"),
         uplift_conv=("uplift_eur_conv","sum"),
     ).reset_index()
-    cards["csm2i_current"] = cards["actual_spv"] / (float(ref_spv) + EPS)
-    cards["uplift_total"]  = cards["uplift_csm"] + cards["uplift_conv"]
 
+    store_stats["csm2i_current"] = store_stats["spv"] / (float(ref_spv) + EPS)
+    store_stats["uplift_total"]  = store_stats["uplift_csm"] + store_stats["uplift_conv"]
+
+    conv_target = float(conv_goal_pct) / 100.0
     def eur0(x): return ("€{:,.0f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X",".")
     def idx2(v):  return f"{v:.2f}".replace(".", ",")
 
-    for _, r in cards.sort_values("uplift_total", ascending=False).iterrows():
-        ok = float(r["csm2i_current"]) >= float(csm2i_target)
-        badge = "🟢" if ok else "🟠"
+    for _, r in store_stats.sort_values("uplift_total", ascending=False).iterrows():
+        # badges
+        ok_csm  = r["csm2i_current"] >= float(csm2i_target)
+        ok_sqm  = r["spsqm"]         >= r["expected_spsqm"] - 1e-6
+        ok_conv = r["conv"]          >= conv_target
+        b = lambda ok: "🟢" if ok else "🟠"
+
+        # aanbevelingen (heel kort en actiegericht)
+        tips = []
+        if not ok_csm:
+            tips.append("Verhoog SPV (bundels/upsell, kassa‑acties).")
+        if not ok_sqm:
+            tips.append("Benut m² beter (hotzones, productmix, zichtbaardere acties).")
+        if not ok_conv:
+            tips.append("Conversie‑push (extra bezetting piek, actieve benadering, drempelpromos).")
+        if not tips:
+            tips = ["Behoud performance; borg best practices."]
+
         st.markdown(
             f"""
             <div style="border:1px solid #eee; border-radius:12px; padding:16px; margin:10px 0; background:#fff;">
               <div style="font-weight:700; font-size:20px; margin-bottom:8px;">{r['shop_name']}</div>
-              <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+
+              <div style="display:grid; grid-template-columns: repeat(3,minmax(220px,1fr)); gap:18px; align-items:start;">
                 <div>
-                  <div style="opacity:.75; font-size:14px; margin-bottom:4px;">CSm²I huidig vs target</div>
-                  <div style="font-weight:800; font-size:26px;">
-                    {idx2(r['csm2i_current'])} / {idx2(float(csm2i_target))}
-                    <span style="margin-left:8px;">{badge}</span>
+                  <div style="opacity:.75; font-size:13px;">CSm²I (huidig / target)</div>
+                  <div style="font-weight:800; font-size:22px;">{idx2(r['csm2i_current'])} / {idx2(float(csm2i_target))} <span>{b(ok_csm)}</span></div>
+                </div>
+                <div>
+                  <div style="opacity:.75; font-size:13px;">Sales per m² (huidig / verwacht)</div>
+                  <div style="font-weight:800; font-size:22px;">
+                    {("€{:,.2f}".format(r['spsqm'])).replace(",", "X").replace(".", ",").replace("X",".")}
+                    /
+                    {("€{:,.2f}".format(r['expected_spsqm'])).replace(",", "X").replace(".", ",").replace("X",".")}
+                    <span>{b(ok_sqm)}</span>
                   </div>
                 </div>
                 <div>
-                  <div style="opacity:.75; font-size:14px; margin-bottom:4px;">Potentiële uplift</div>
-                  <div style="font-weight:800; font-size:26px;" class="eur">{eur0(r['uplift_total'])}</div>
+                  <div style="opacity:.75; font-size:13px;">Conversie (huidig / doel)</div>
+                  <div style="font-weight:800; font-size:22px;">
+                    {idx2(r['conv']*100)}% / {idx2(conv_target*100)}% <span>{b(ok_conv)}</span>
+                  </div>
                 </div>
               </div>
+    
+              <div style="margin-top:12px; display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+                <div>
+                  <div style="opacity:.75; font-size:13px;">Potentiële uplift (totaal)</div>
+                  <div style="font-weight:800; font-size:24px;">{eur0(r['uplift_total'])}</div>
+                </div>
+                <div style="opacity:.95;">✅ { ' '.join(tips) }</div>
+              </div>
             </div>
-            """,
+           """,
             unsafe_allow_html=True
         )
+
 
     # ===== Scatter (laatste visual): SPV vs Sales per m² =====
     rad = df.groupby(["shop_id", "shop_name"]).agg(
@@ -357,7 +398,8 @@ if analyze:
         x="spv", y="spsqm", size="size_metric",
         color="csm2i_band", symbol="csm2i_band",
         color_discrete_map=color_map, symbol_map=symbol_map,
-        hover_data=["hover_spv", "hover_spsqm", "hover_csi", "hover_size"],
+        hover_data=None,  # niets extra's auto‑toevoegen
+        custom_data=rad[["hover_spv","hover_spsqm","hover_csi","hover_size"]],  # vaste volgorde
         labels={"spv": "Sales per Visitor", "spsqm": "Sales per m²", "csm2i_band": "CSm²I t.o.v. target"},
     )
     scatter.update_traces(
@@ -376,6 +418,7 @@ if analyze:
         yaxis=dict(title="Sales per m² (€/m²)", tickformat=",.2f"),
     )
     st.plotly_chart(scatter, use_container_width=True)
+
 
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
