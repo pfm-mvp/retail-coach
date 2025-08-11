@@ -134,18 +134,41 @@ def ensure_basics(df: pd.DataFrame) -> pd.DataFrame:
     out["atv"] = out.get("turnover", 0.0) / (out.get("transactions", 0.0) + EPS)
     return out
 
-def add_csm2i(df: pd.DataFrame, target_index: float = 1.0) -> pd.DataFrame:
+def add_csm2i(df: pd.DataFrame, target_index: float, ref_spv: float) -> pd.DataFrame:
+    """
+    # 1) Kies een referentie‑SPV: gewogen portfolio‑SPV (turnover som / bezoekers som)
+    ref_spv_portfolio = df["turnover"].sum() / (df["count_in"].sum() + EPS)
+
+    # 2) Optioneel SPV‑target via slider (bijv. +10% / +20%)
+    ref_spv_target = ref_spv_portfolio * (1.0 + spv_uplift_pct / 100.0)
+
+    # 3) Bereken CSm²I en uplift t.o.v. CSm²I‑target met "expected" op basis van ref_spv_target
+    df = add_csm2i(df, target_index=csm2i_target, ref_spv=ref_spv_target)
+    """
     out = ensure_basics(df)
+
+    # sq_meter fallback
     sqm = pd.to_numeric(out.get("sq_meter"), errors="coerce")
     median_sqm = sqm.replace(0, np.nan).median()
     fallback = median_sqm if pd.notnull(median_sqm) and median_sqm > 0 else DEFAULT_SQ_METER
     out["sq_meter"] = sqm.replace(0, np.nan).fillna(fallback)
 
+    # bouw bouwstenen
     out["visitors_per_sqm"] = out["count_in"] / (out["sq_meter"] + EPS)
     out["actual_spsqm"]     = out["turnover"]  / (out["sq_meter"] + EPS)
-    out["expected_spsqm"]   = out["sales_per_visitor"] * out["visitors_per_sqm"]
-    out["csm2i"]            = out["actual_spsqm"] / (out["expected_spsqm"] + EPS)
-    out["uplift_eur_csm"]   = np.maximum(0.0, (target_index * out["expected_spsqm"] - out["actual_spsqm"])) * out["sq_meter"]
+
+    # *** BELANGRIJK: expected op basis van benchmark/target SPV, NIET actuele SPV ***
+    ref_spv = float(max(ref_spv, 0.0))
+    out["expected_spsqm"] = ref_spv * out["visitors_per_sqm"]
+
+    # Index = actual / expected  (komt neer op actual_spv / ref_spv)
+    out["csm2i"] = out["actual_spsqm"] / (out["expected_spsqm"] + EPS)
+
+    # Uplift t.o.v. CSm²I-target
+    out["uplift_eur_csm"] = np.maximum(
+        0.0, (float(target_index) * out["expected_spsqm"] - out["actual_spsqm"])
+    ) * out["sq_meter"]
+
     return out
 
 # ========== Next Best Action rules ==========
