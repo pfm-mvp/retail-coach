@@ -265,8 +265,16 @@ if analyze:
     if "uplift_total" in agg.columns:
         size_series = agg.set_index("shop_id")["uplift_total"]
         rad["size_metric"] = rad["shop_id"].map(size_series).fillna(0.0)
+        size_label = "Uplift"
+        rad["hover_size"] = rad["size_metric"].round(0).map(
+            lambda v: ("€{:,.0f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")
+        )
     else:
         rad["size_metric"] = rad["visitors"].fillna(0.0)
+        size_label = "Bezoekers"
+        rad["hover_size"] = rad["size_metric"].round(0).map(
+            lambda v: "{:,.0f}".format(v).replace(",", ".")
+        )
 
     # Band t.o.v. target (±5%)
     low_thr  = float(csm2i_target) * 0.95
@@ -277,47 +285,43 @@ if analyze:
         default="Rond target",
     )
 
-    # nette hover
-    rad["spv_fmt"]   = rad["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
-    rad["spsqm_fmt"] = rad["spsqm"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
-    rad["csi_fmt"]   = rad["csi"].round(2).astype(str).str.replace(".", ",")
-    rad["size_fmt"]  = (
-        rad["size_metric"].round(0).map(lambda v: ("€{:,.0f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
-        if "uplift_total" in agg.columns
-        else rad["size_metric"].round(0).map(lambda v: "{:,.0f}".format(v).replace(",", "."))
-    )
+    # Hover‑velden expliciet en in vaste volgorde (voorkomt %{customdata[..]} ellende)
+    rad["hover_spv"]   = rad["spv"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
+    rad["hover_spsqm"] = rad["spsqm"].round(2).apply(lambda v: ("€{:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", "."))
+    rad["hover_csi"]   = rad["csi"].round(2).map(lambda v: str(v).replace(".", ","))
 
     color_map  = {"Onder target": "#F04438", "Rond target": "#F59E0B", "Boven target": "#16A34A"}
     symbol_map = {"Onder target": "diamond", "Rond target": "circle", "Boven target": "square"}
 
-    rad_scatter = px.scatter(
+    # Alleen deze 4 custom velden meegeven, in vaste volgorde
+    scatter = px.scatter(
         rad,
         x="spv", y="spsqm", size="size_metric",
         color="csm2i_band", symbol="csm2i_band",
         color_discrete_map=color_map, symbol_map=symbol_map,
-        hover_data={
-            "shop_name": True, "spv": False, "spsqm": False, "csi": False, "size_metric": False,
-            "spv_fmt": True, "spsqm_fmt": True, "csi_fmt": True, "size_fmt": True,
-        },
+        hover_data=["hover_spv", "hover_spsqm", "hover_csi", "hover_size"],
         labels={"spv": "Sales per Visitor", "spsqm": "Sales per m²", "csm2i_band": "CSm²I t.o.v. target"},
     )
 
-    hover_title = "Uplift" if "uplift_total" in agg.columns else "Bezoekers"
-    rad_scatter.update_traces(
-        hovertemplate="<b>%{customdata[0]}</b><br>"
-                      "SPV: %{customdata[5]}<br>"
-                      "Sales per m²: %{customdata[6]}<br>"
-                      "CSm²I: %{customdata[7]}<br>"
-                      f"{hover_title}: " + "%{customdata[8]}<extra></extra>"
+    # customdata indices nu altijd 0..3 (in de volgorde hierboven)
+    scatter.update_traces(
+        hovertemplate="<b>%{text}</b><br>" +
+                      "SPV: %{customdata[0]}<br>" +
+                      "Sales per m²: %{customdata[1]}<br>" +
+                      "CSm²I: %{customdata[2]}<br>" +
+                      f"{size_label}: " + "%{customdata[3]}<extra></extra>",
+        text=rad["shop_name"],
     )
-    rad_scatter.update_layout(
+
+    scatter.update_layout(
         margin=dict(l=20, r=20, t=10, b=10),
         height=560,
         legend_title_text="CSm²I t.o.v. target",
         xaxis=dict(title="Sales per Visitor (€/bezoeker)", tickformat=",.2f"),
         yaxis=dict(title="Sales per m² (€/m²)", tickformat=",.2f"),
     )
-    st.plotly_chart(rad_scatter, use_container_width=True)
+
+    st.plotly_chart(scatter, use_container_width=True)
 
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
