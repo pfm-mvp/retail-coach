@@ -136,14 +136,10 @@ def ensure_basics(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_csm2i(df: pd.DataFrame, target_index: float, ref_spv: float) -> pd.DataFrame:
     """
-    # 1) Kies een referentie‑SPV: gewogen portfolio‑SPV (turnover som / bezoekers som)
-    ref_spv_portfolio = df["turnover"].sum() / (df["count_in"].sum() + EPS)
-
-    # 2) Optioneel SPV‑target via slider (bijv. +10% / +20%)
-    ref_spv_target = ref_spv_portfolio * (1.0 + spv_uplift_pct / 100.0)
-
-    # 3) Bereken CSm²I en uplift t.o.v. CSm²I‑target met "expected" op basis van ref_spv_target
-    df = add_csm2i(df, target_index=csm2i_target, ref_spv=ref_spv_target)
+    ref_spv = benchmark/target SPV (in € per bezoeker) voor 'expected'.
+    expected_spsqm = ref_spv * visitors_per_sqm
+    csm2i          = actual_spsqm / expected_spsqm = (actual_spv / ref_spv)  (sqm valt weg)
+    uplift_eur_csm = max(0, target_index*expected_spsqm - actual_spsqm) * sq_meter
     """
     out = ensure_basics(df)
 
@@ -157,7 +153,7 @@ def add_csm2i(df: pd.DataFrame, target_index: float, ref_spv: float) -> pd.DataF
     out["visitors_per_sqm"] = out["count_in"] / (out["sq_meter"] + EPS)
     out["actual_spsqm"]     = out["turnover"]  / (out["sq_meter"] + EPS)
 
-    # *** BELANGRIJK: expected op basis van benchmark/target SPV, NIET actuele SPV ***
+    # *** expected op basis van benchmark/target SPV, NIET actuele SPV ***
     ref_spv = float(max(ref_spv, 0.0))
     out["expected_spsqm"] = ref_spv * out["visitors_per_sqm"]
 
@@ -285,7 +281,14 @@ if analyze:
 
     # ---- volgorde is belangrijk: eerst basics, dan CSm²I ----
     df = ensure_basics(df)
-    df = add_csm2i(df, target_index=csm2i_target)
+    # Portfolio‑SPV als referentie (gewogen): turnover / visitors
+    ref_spv_portfolio = df["turnover"].sum() / (df["count_in"].sum() + EPS)
+
+    # Slider "SPV‑uplift (%)" toepassen op de referentie
+    ref_spv_target = ref_spv_portfolio * (1.0 + spv_uplift_pct / 100.0)
+
+    # Bereken CSm²I en uplift t.o.v. CSm²I‑target met expected op basis van ref_spv_target
+    df = add_csm2i(df, target_index=csm2i_target, ref_spv=ref_spv_target)
 
     # ===== 📐 CSm²I impact cards =====
     st.markdown("### 📐 CSm²I impact (per winkel)")
