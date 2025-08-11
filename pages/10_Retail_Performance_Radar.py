@@ -163,7 +163,7 @@ selected_names = st.multiselect("Selecteer winkels", names, default=names[:5], p
 shop_ids = [NAME_TO_ID[n] for n in selected_names]
 
 # Analyseer‑knop (links)
-analyze = st.button("🔍 Analyseer", type="secondary")
+analyze = st.button("Analyseer", type="secondary")
 
 # =========================
 # API helpers
