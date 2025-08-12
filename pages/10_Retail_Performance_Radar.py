@@ -580,27 +580,38 @@ if analyze:
                 st.plotly_chart(fig, use_container_width=True)
 
                 # ===== Heatmap bezoekers: weekday x hour (gemiddeld per weekday‑uur)
-                sub["weekday_en"] = pd.to_datetime(sub["date"]).map(lambda d: pd.Timestamp(d).day_name())
-                sub["weekday_en"] = pd.Categorical(sub["weekday_en"], ordered=True, categories=WEEKDAY_ORDER_EN)
-                sub["weekday_nl"] = sub["weekday_en"].map(lambda d: WEEKDAY_EN_TO_NL.get(str(d), str(d))).astype(str)
+                # Zorg dat 'date' aanwezig en valide is
+                sub = sub.dropna(subset=["date"]).copy()
+                sub["date_ts"] = pd.to_datetime(sub["date"], errors="coerce")
+                sub = sub.dropna(subset=["date_ts"]).copy()
 
-                # Robuuste gemiddelde per weekday-uur over het aantal dagen dat dat combi voorkomt
-                grp_wh = sub.groupby(["weekday_en","weekday_nl","hour"], as_index=False).agg(
+                # Engelstalige weekday voor ordening; NL-labels na aggregatie toevoegen
+                sub["weekday_en"] = sub["date_ts"].dt.day_name()
+                sub["weekday_en"] = pd.Categorical(sub["weekday_en"], ordered=True, categories=WEEKDAY_ORDER_EN)
+
+                # Robuuste gemiddelde per weekday-uur over het aantal dagen dat die combi voorkomt
+                grp_wh = sub.groupby(["weekday_en","hour"], observed=True, as_index=False).agg(
                     visitors_sum=("count_in","sum"),
                     days_present=("date_ts","nunique"),
                 )
                 grp_wh["visitors_avg"] = grp_wh["visitors_sum"] / grp_wh["days_present"].replace(0, np.nan)
 
-                # Pivot op NL labels, maar volgorde volgens EN
-                pivot = grp_wh.pivot_table(index="weekday_nl", columns="hour", values="visitors_avg", aggfunc="mean").reindex(WEEKDAY_ORDER_NL)
-                pivot = pivot.fillna(0)
+                # NL-labels toevoegen NA aggregatie om length-mismatch te voorkomen
+                grp_wh["weekday_nl"] = grp_wh["weekday_en"].astype(str).map(lambda d: WEEKDAY_EN_TO_NL.get(d, d))
 
-                # Teksten voor hover
-                text_matrix = [[f"{rowlabel} {int(col):02d}:00 — {fmt_int(val)} bezoekers" for col, val in zip(pivot.columns, row)] for rowlabel, row in zip(pivot.index, pivot.values)]
+                # Pivot op NL labels, maar reindex volgens vaste volgorde
+                pivot = grp_wh.pivot_table(index="weekday_nl", columns="hour", values="visitors_avg", aggfunc="mean")
+                pivot = pivot.reindex(WEEKDAY_ORDER_NL)
+                pivot = pivot.fillna(0)
 
                 if pivot.empty:
                     st.info("Binnen de opgegeven openingstijd is geen uurdata.")
                 else:
+                    # Teksten voor hover
+                    hours_sorted = sorted(pivot.columns.tolist())
+                    pivot = pivot[hours_sorted]
+                    text_matrix = [[f"{rowlabel} {int(col):02d}:00 — {fmt_int(val)} bezoekers" for col, val in zip(pivot.columns, row)] for rowlabel, row in zip(pivot.index, pivot.values)]
+
                     fig_hm = go.Figure(data=go.Heatmap(
                         z=pivot.values,
                         x=pivot.columns,
