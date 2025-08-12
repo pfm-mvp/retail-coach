@@ -173,7 +173,7 @@ def compute_csm2i_and_uplift(df: pd.DataFrame, ref_spv: float, csm2i_target: flo
     return out
 
 # =========================
-# Shop mapping
+# Shop mapping (ONGEWIJZIGD)
 # =========================
 try:
     from shop_mapping import SHOP_NAME_MAP as _MAP  # {id:int: "Naam"}
@@ -186,24 +186,27 @@ names = sorted(NAME_TO_ID.keys(), key=str.lower)
 # =========================
 # UI – periode, granulariteit, winkels, targets
 # =========================
+PERIOD_OPTIONS = [
+    ("Last week",   "last_week"),
+    ("This month",  "this_month"),
+    ("Last month",  "last_month"),
+    ("This quarter","this_quarter"),
+    ("Last quarter","last_quarter"),
+    ("This year",   "this_year"),
+    ("Last year",   "last_year"),
+]
+
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    period_label = st.selectbox("Periode", ["7 dagen", "30 dagen", "last_month"], index=0)
+    period_label = st.selectbox("Periode", [lbl for (lbl, _) in PERIOD_OPTIONS], index=1)
+    period_token = dict(PERIOD_OPTIONS)[period_label]
 with c2:
     gran = st.selectbox("Granulariteit", ["Dag", "Uur"], index=0)
 with c3:
     proj_toggle = st.toggle("Toon projectie voor resterend jaar", value=False)
 
-# datums
-today = date.today()
-if period_label == "last_month":
-    first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-    last  = today.replace(day=1) - timedelta(days=1)
-    date_from, date_to = first, last
-elif period_label == "30 dagen":
-    date_from, date_to = today - timedelta(days=30), today - timedelta(days=1)
-else:
-    date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
+# (We gebruiken presets; geen date_from/date_to meer nodig voor de API)
+# today = date.today()  # alleen nodig als je elders nog datums wilt tonen
 
 c4, c5, c6 = st.columns([1,1,1])
 with c4:
@@ -227,21 +230,16 @@ open_start, open_end = st.slider(
 analyze = st.button("🔍 Analyseer", type="secondary")
 
 # =========================
-# API helper (robust encoder + fallback)
+# API helper – presets (period=<token>)
 # =========================
-def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, show_hours=None, timeout=60):
+def fetch_report(api_url, shop_ids, period_token, step, outputs, show_hours=None, timeout=60):
     """
-    Primary: repeat keys (data, data_output) + step=hour|day  -> like Dead Hour app.
-    Fallback: bracketed keys (data[], data_output[]) + period_step=... if the server rejects primary.
+    Roept Vemcount aan met presets:
+      period=<token>  (bijv. last_week, this_month, ...)
+      step=hour|day
+    Keys voor data en outputs worden herhaald zoals in je andere apps.
     """
-    # --- primary (repeat keys, step)
-    params = [
-        ("source", "shops"),
-        ("period", "date"),
-        ("form_date_from", str(dfrom)),
-        ("form_date_to", str(dto)),
-        ("step", step),
-    ]
+    params = [("source", "shops"), ("period", period_token), ("step", step)]
     for sid in shop_ids:
         params.append(("data", int(sid)))
     for outp in outputs:
@@ -251,39 +249,11 @@ def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, show_hours=None, 
         params.append(("show_hours_from", f"{sh:02d}:00"))
         params.append(("show_hours_to",   f"{eh:02d}:00"))
 
-    # Build URL manually to preserve repeated keys exactly like Dead Hour
     qs = urlencode(params, doseq=True).replace("%3A", ":")
     url = f"{api_url}?{qs}"
-
-    # Try primary
     r = requests.post(url, timeout=timeout)
-    try:
-        r.raise_for_status()
-        return r.json()
-    except requests.HTTPError:
-        # --- fallback (bracket keys + period_step)
-        params_fb = [
-            ("source", "shops"),
-            ("period", "date"),
-            ("form_date_from", str(dfrom)),
-            ("form_date_to", str(dto)),
-            ("period_step", step),
-        ]
-        for sid in shop_ids:
-            params_fb.append(("data[]", int(sid)))
-        for outp in outputs:
-            params_fb.append(("data_output[]", outp))
-        if show_hours and step == "hour":
-            sh, eh = show_hours
-            params_fb.append(("show_hours_from", f"{sh:02d}:00"))
-            params_fb.append(("show_hours_to",   f"{eh:02d}:00"))
-
-        qs_fb = urlencode(params_fb, doseq=True).replace("%3A", ":")
-        url_fb = f"{api_url}?{qs_fb}"
-        r2 = requests.post(url_fb, timeout=timeout)
-        r2.raise_for_status()
-        return r2.json()
-
+    r.raise_for_status()
+    return r.json()
 
 def normalize_resp(resp):
     rows = []
@@ -317,13 +287,13 @@ if analyze:
         st.warning("Selecteer minimaal één winkel."); st.stop()
     API_URL = st.secrets.get("API_URL","").rstrip("/")
     if not API_URL:
-        st.warning("Stel API_URL in via .streamlit/secrets.toml"); st.stop()
+        st.warning("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
 
     step = "hour" if gran.lower().startswith("u") else "day"
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
 
     with st.spinner("Data ophalen…"):
-        resp = fetch_report(API_URL, shop_ids, date_from, date_to, step, outputs, show_hours=(open_start, open_end))
+        resp = fetch_report(API_URL, shop_ids, period_token, step, outputs, show_hours=(open_start, open_end))
         df_raw = normalize_resp(resp)
         if df_raw.empty:
             st.info("Geen data beschikbaar voor de gekozen periode/granulariteit."); st.stop()
@@ -394,19 +364,21 @@ if analyze:
         unsafe_allow_html=True
     )
     if proj_toggle:
-        # resterende dagen dit jaar
+        # Projectie op basis van # unieke dagen in dataset (past bij presets)
+        try:
+            days_in_period = int(pd.to_datetime(df["date"], errors="coerce").nunique())
+            if days_in_period <= 0:
+                days_in_period = 1
+        except Exception:
+            days_in_period = 1
+
         today2 = date.today()
         end_year = date(today2.year, 12, 31)
         rem_days = (end_year - today2).days
-        # dag-equivalent van gekozen periode
-        if period_label == "last_month":
-            days_in_period = (date_to - date_from).days + 1
-        elif period_label == "30 dagen":
-            days_in_period = 30
-        else:
-            days_in_period = 7
+
         daily_potential = g["uplift_total"].sum() / max(1, days_in_period)
         projection = daily_potential * max(0, rem_days)
+
         cB.markdown(
             f"""
             <div class="big-card">
@@ -660,9 +632,8 @@ if analyze:
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
         dbg = {
+            "period_token": period_token,
             "period_step": step,
-            "from": str(date_from),
-            "to": str(date_to),
             "shop_ids": shop_ids,
             "ref_spv": ref_spv,
             "csm2i_target": csm2i_target,
