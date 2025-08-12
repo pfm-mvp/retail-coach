@@ -544,9 +544,8 @@ if step == "hour":
             )
 
             st.plotly_chart(fig_hm, use_container_width=True, key=f"hm_{sid}_{i}")
-
-            else:
-                st.info("Geen uurlijkse rijen voor deze winkel in de gekozen periode.")
+        else:
+            st.info("Geen uurlijkse rijen voor deze winkel in de gekozen periode.")
 
         # Suggesties
         bullets = []
