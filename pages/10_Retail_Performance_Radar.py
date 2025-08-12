@@ -173,7 +173,7 @@ def compute_csm2i_and_uplift(df: pd.DataFrame, ref_spv: float, csm2i_target: flo
     return out
 
 # =========================
-# Shop mapping (ONGEWIJZIGD)
+# Shop mapping
 # =========================
 try:
     from shop_mapping import SHOP_NAME_MAP as _MAP  # {id:int: "Naam"}
@@ -186,27 +186,73 @@ names = sorted(NAME_TO_ID.keys(), key=str.lower)
 # =========================
 # UI – periode, granulariteit, winkels, targets
 # =========================
-PERIOD_OPTIONS = [
-    ("Last week",   "last_week"),
-    ("This month",  "this_month"),
-    ("Last month",  "last_month"),
-    ("This quarter","this_quarter"),
-    ("Last quarter","last_quarter"),
-    ("This year",   "this_year"),
-    ("Last year",   "last_year"),
-]
-
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    period_label = st.selectbox("Periode", [lbl for (lbl, _) in PERIOD_OPTIONS], index=1)
-    period_token = dict(PERIOD_OPTIONS)[period_label]
+    # ---- Alleen dit blok is aangepast: presets + datumafleiding per preset
+    PERIOD_OPTIONS = [
+        "Last week",
+        "This month",
+        "Last month",
+        "This quarter",
+        "Last quarter",
+        "This year",
+        "Last year",
+    ]
+    period_label = st.selectbox("Periode", PERIOD_OPTIONS, index=1)
+
 with c2:
     gran = st.selectbox("Granulariteit", ["Dag", "Uur"], index=0)
 with c3:
     proj_toggle = st.toggle("Toon projectie voor resterend jaar", value=False)
 
-# (We gebruiken presets; geen date_from/date_to meer nodig voor de API)
-# today = date.today()  # alleen nodig als je elders nog datums wilt tonen
+# datums (afgeleid per preset; API blijft 'period=date' gebruiken met from/to)
+today = date.today()
+
+def month_start(d: date) -> date:
+    return d.replace(day=1)
+
+def month_end(d: date) -> date:
+    return (d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+def quarter_start(d: date) -> date:
+    q = (d.month - 1) // 3
+    m = 1 + 3*q
+    return date(d.year, m, 1)
+
+def quarter_end(d: date) -> date:
+    qs = quarter_start(d)
+    return month_end(qs.replace(month=qs.month + 2))
+
+def prev_quarter_range(d: date):
+    qs = quarter_start(d)
+    last_day_prev_q = qs - timedelta(days=1)
+    start_prev_q = quarter_start(last_day_prev_q)
+    end_prev_q = quarter_end(last_day_prev_q)
+    return start_prev_q, end_prev_q
+
+if period_label == "Last week":
+    # vorige kalenderweek (ma-zo)
+    weekday = today.weekday()  # Monday=0
+    last_monday = today - timedelta(days=weekday + 7)
+    last_sunday = last_monday + timedelta(days=6)
+    date_from, date_to = last_monday, last_sunday
+elif period_label == "This month":
+    date_from, date_to = month_start(today), today - timedelta(days=1)
+elif period_label == "Last month":
+    first_this = month_start(today)
+    last_prev = first_this - timedelta(days=1)
+    date_from, date_to = month_start(last_prev), last_prev
+elif period_label == "This quarter":
+    date_from, date_to = quarter_start(today), today - timedelta(days=1)
+elif period_label == "Last quarter":
+    date_from, date_to = prev_quarter_range(today)
+elif period_label == "This year":
+    date_from, date_to = date(today.year, 1, 1), today - timedelta(days=1)
+elif period_label == "Last year":
+    date_from, date_to = date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
+else:
+    # fallback (zou niet moeten gebeuren)
+    date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
 
 c4, c5, c6 = st.columns([1,1,1])
 with c4:
@@ -230,16 +276,21 @@ open_start, open_end = st.slider(
 analyze = st.button("🔍 Analyseer", type="secondary")
 
 # =========================
-# API helper – presets (period=<token>)
+# API helper (robust encoder + fallback)
 # =========================
-def fetch_report(api_url, shop_ids, period_token, step, outputs, show_hours=None, timeout=60):
+def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, show_hours=None, timeout=60):
     """
-    Roept Vemcount aan met presets:
-      period=<token>  (bijv. last_week, this_month, ...)
-      step=hour|day
-    Keys voor data en outputs worden herhaald zoals in je andere apps.
+    Primary: repeat keys (data, data_output) + step=hour|day  -> like Dead Hour app.
+    Fallback: bracketed keys (data[], data_output[]) + period_step=... if the server rejects primary.
     """
-    params = [("source", "shops"), ("period", period_token), ("step", step)]
+    # --- primary (repeat keys, step)
+    params = [
+        ("source", "shops"),
+        ("period", "date"),
+        ("form_date_from", str(dfrom)),
+        ("form_date_to", str(dto)),
+        ("step", step),
+    ]
     for sid in shop_ids:
         params.append(("data", int(sid)))
     for outp in outputs:
@@ -249,11 +300,39 @@ def fetch_report(api_url, shop_ids, period_token, step, outputs, show_hours=None
         params.append(("show_hours_from", f"{sh:02d}:00"))
         params.append(("show_hours_to",   f"{eh:02d}:00"))
 
+    # Build URL manually to preserve repeated keys exactly like Dead Hour
     qs = urlencode(params, doseq=True).replace("%3A", ":")
     url = f"{api_url}?{qs}"
+
+    # Try primary
     r = requests.post(url, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    try:
+        r.raise_for_status()
+        return r.json()
+    except requests.HTTPError:
+        # --- fallback (bracket keys + period_step)
+        params_fb = [
+            ("source", "shops"),
+            ("period", "date"),
+            ("form_date_from", str(dfrom)),
+            ("form_date_to", str(dto)),
+            ("period_step", step),
+        ]
+        for sid in shop_ids:
+            params_fb.append(("data[]", int(sid)))
+        for outp in outputs:
+            params_fb.append(("data_output[]", outp))
+        if show_hours and step == "hour":
+            sh, eh = show_hours
+            params_fb.append(("show_hours_from", f"{sh:02d}:00"))
+            params_fb.append(("show_hours_to",   f"{eh:02d}:00"))
+
+        qs_fb = urlencode(params_fb, doseq=True).replace("%3A", ":")
+        url_fb = f"{api_url}?{qs_fb}"
+        r2 = requests.post(url_fb, timeout=timeout)
+        r2.raise_for_status()
+        return r2.json()
+
 
 def normalize_resp(resp):
     rows = []
@@ -287,13 +366,13 @@ if analyze:
         st.warning("Selecteer minimaal één winkel."); st.stop()
     API_URL = st.secrets.get("API_URL","").rstrip("/")
     if not API_URL:
-        st.warning("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
+        st.warning("Stel API_URL in via .streamlit/secrets.toml"); st.stop()
 
     step = "hour" if gran.lower().startswith("u") else "day"
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
 
     with st.spinner("Data ophalen…"):
-        resp = fetch_report(API_URL, shop_ids, period_token, step, outputs, show_hours=(open_start, open_end))
+        resp = fetch_report(API_URL, shop_ids, date_from, date_to, step, outputs, show_hours=(open_start, open_end))
         df_raw = normalize_resp(resp)
         if df_raw.empty:
             st.info("Geen data beschikbaar voor de gekozen periode/granulariteit."); st.stop()
@@ -364,21 +443,15 @@ if analyze:
         unsafe_allow_html=True
     )
     if proj_toggle:
-        # Projectie op basis van # unieke dagen in dataset (past bij presets)
-        try:
-            days_in_period = int(pd.to_datetime(df["date"], errors="coerce").nunique())
-            if days_in_period <= 0:
-                days_in_period = 1
-        except Exception:
-            days_in_period = 1
-
+        # resterende dagen dit jaar
         today2 = date.today()
         end_year = date(today2.year, 12, 31)
         rem_days = (end_year - today2).days
-
+        # dag-equivalent van gekozen periode
+        # (benaderd via datumbereik; consistent met period=date)
+        days_in_period = (date_to - date_from).days + 1
         daily_potential = g["uplift_total"].sum() / max(1, days_in_period)
         projection = daily_potential * max(0, rem_days)
-
         cB.markdown(
             f"""
             <div class="big-card">
@@ -632,8 +705,9 @@ if analyze:
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
         dbg = {
-            "period_token": period_token,
             "period_step": step,
+            "from": str(date_from),
+            "to": str(date_to),
             "shop_ids": shop_ids,
             "ref_spv": ref_spv,
             "csm2i_target": csm2i_target,
