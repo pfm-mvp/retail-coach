@@ -1,8 +1,9 @@
+# pages/10_Retail_Performance_Radar.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import date
+from datetime import date, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from urllib.parse import urlencode
@@ -55,47 +56,17 @@ st.caption("Next Best Action • Best Practice Finder • (optioneel) Demografie
 EPS = 1e-9
 DEFAULT_SQ_METER = 1.0
 
-# NL weekday mapping (for tooltips/heatmap)
-WEEKDAY_EN_TO_NL = {
-    "Monday": "maandag",
-    "Tuesday": "dinsdag",
-    "Wednesday": "woensdag",
-    "Thursday": "donderdag",
-    "Friday": "vrijdag",
-    "Saturday": "zaterdag",
-    "Sunday": "zondag",
-}
-WEEKDAY_ORDER_EN = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-WEEKDAY_ORDER_NL = [WEEKDAY_EN_TO_NL[d] for d in WEEKDAY_ORDER_EN]
-
-
 def fmt_eur(x: float) -> str:
     try:
         return ("€{:,.0f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X",".")
     except Exception:
         return "€0"
 
-
 def fmt_eur2(x: float) -> str:
     try:
         return ("€{:,.2f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X",".")
     except Exception:
         return "€0,00"
-
-
-def fmt_int(x: float) -> str:
-    try:
-        return ("{:,.0f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "0"
-
-
-def fmt_pct(x: float, decimals: int = 1) -> str:
-    try:
-        return (f"{x*100:.{decimals}f}").replace(".", ",") + "%"
-    except Exception:
-        return "0%"
-
 
 def coerce_numeric(df, cols):
     out = df.copy()
@@ -104,14 +75,11 @@ def coerce_numeric(df, cols):
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
     return out
 
-
 def normalize_kpis(df: pd.DataFrame) -> pd.DataFrame:
-    out = coerce_numeric(df, [
-        "turnover","transactions","count_in","sales_per_visitor","conversion_rate","sq_meter"
-    ])
+    out = coerce_numeric(df, ["turnover","transactions","count_in","sales_per_visitor","conversion_rate","sq_meter"])
     # conversie -> fractie (0..1) indien nodig
     if "conversion_rate" in out.columns and not out["conversion_rate"].empty:
-        if out["conversion_rate"].max() > 1.5:  # % → fractie
+        if out["conversion_rate"].max() > 1.5:
             out["conversion_rate"] = out["conversion_rate"] / 100.0
     else:
         out["conversion_rate"] = out.get("transactions", 0.0) / (out.get("count_in", 0.0) + EPS)
@@ -129,7 +97,6 @@ def normalize_kpis(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["sq_meter"] = DEFAULT_SQ_METER
     return out
-
 
 def choose_ref_spv(df: pd.DataFrame, mode="portfolio", benchmark_shop_id=None, manual_spv=None, uplift_pct=0.0):
     safe = df.copy()
@@ -153,7 +120,6 @@ def choose_ref_spv(df: pd.DataFrame, mode="portfolio", benchmark_shop_id=None, m
         base = spv_of(safe)
     base = max(0.0, float(base))
     return base * (1.0 + float(uplift_pct))
-
 
 def compute_csm2i_and_uplift(df: pd.DataFrame, ref_spv: float, csm2i_target: float):
     """
@@ -186,24 +152,24 @@ names = sorted(NAME_TO_ID.keys(), key=str.lower)
 # =========================
 # UI – periode, granulariteit, winkels, targets
 # =========================
-PERIOD_OPTIONS = [
-    ("Last week",   "last_week"),
-    ("This month",  "this_month"),
-    ("Last month",  "last_month"),
-    ("This quarter","this_quarter"),
-    ("Last quarter","last_quarter"),
-    ("This year",   "this_year"),
-    ("Last year",   "last_year"),
-]
-
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    period_label = st.selectbox("Periode", [lbl for (lbl, _) in PERIOD_OPTIONS], index=1)
-    period_token = dict(PERIOD_OPTIONS)[period_label]
+    period_label = st.selectbox("Periode", ["7 dagen", "30 dagen", "last_month"], index=0)
 with c2:
     gran = st.selectbox("Granulariteit", ["Dag", "Uur"], index=0)
 with c3:
     proj_toggle = st.toggle("Toon projectie voor resterend jaar", value=False)
+
+# datums
+today = date.today()
+if period_label == "last_month":
+    first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    last  = today.replace(day=1) - timedelta(days=1)
+    date_from, date_to = first, last
+elif period_label == "30 dagen":
+    date_from, date_to = today - timedelta(days=30), today - timedelta(days=1)
+else:
+    date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
 
 c4, c5, c6 = st.columns([1,1,1])
 with c4:
@@ -227,23 +193,21 @@ open_start, open_end = st.slider(
 analyze = st.button("🔍 Analyseer", type="secondary")
 
 # =========================
-# API helper (presets-first, robust fallback)
+# API helper (robust encoder + fallback)
 # =========================
-def fetch_report(api_url, shop_ids, step, outputs, period_token=None, dfrom=None, dto=None, show_hours=None, timeout=60):
+def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, show_hours=None, timeout=60):
     """
-    Primary: repeat keys (data, data_output) + step=hour|day + period=<token>  (Vemcount presets)
-    Fallback: bracketed keys + period_step=... for server quirks.
-    If period_token is None and dates given -> uses period=date with form_date_from/to.
+    Primary: repeat keys (data, data_output) + step=hour|day  -> like Dead Hour app.
+    Fallback: bracketed keys (data[], data_output[]) + period_step=... if the server rejects primary.
     """
-    use_dates = (period_token is None or period_token == "date")
-
     # --- primary (repeat keys, step)
-    params = [("source", "shops"), ("step", step)]
-    if use_dates and dfrom and dto:
-        params.extend([("period","date"), ("form_date_from", str(dfrom)), ("form_date_to", str(dto))])
-    else:
-        params.append(("period", period_token or "this_month"))
-
+    params = [
+        ("source", "shops"),
+        ("period", "date"),
+        ("form_date_from", str(dfrom)),
+        ("form_date_to", str(dto)),
+        ("step", step),
+    ]
     for sid in shop_ids:
         params.append(("data", int(sid)))
     for outp in outputs:
@@ -253,22 +217,24 @@ def fetch_report(api_url, shop_ids, step, outputs, period_token=None, dfrom=None
         params.append(("show_hours_from", f"{sh:02d}:00"))
         params.append(("show_hours_to",   f"{eh:02d}:00"))
 
-    # Build URL manually to preserve repeated keys
+    # Build URL manually to preserve repeated keys exactly like Dead Hour
     qs = urlencode(params, doseq=True).replace("%3A", ":")
     url = f"{api_url}?{qs}"
 
+    # Try primary
     r = requests.post(url, timeout=timeout)
     try:
         r.raise_for_status()
         return r.json()
     except requests.HTTPError:
         # --- fallback (bracket keys + period_step)
-        params_fb = [("source","shops"), ("period_step", step)]
-        if use_dates and dfrom and dto:
-            params_fb.extend([("period","date"), ("form_date_from", str(dfrom)), ("form_date_to", str(dto))])
-        else:
-            params_fb.append(("period", period_token or "this_month"))
-
+        params_fb = [
+            ("source", "shops"),
+            ("period", "date"),
+            ("form_date_from", str(dfrom)),
+            ("form_date_to", str(dto)),
+            ("period_step", step),
+        ]
         for sid in shop_ids:
             params_fb.append(("data[]", int(sid)))
         for outp in outputs:
@@ -283,7 +249,6 @@ def fetch_report(api_url, shop_ids, step, outputs, period_token=None, dfrom=None
         r2 = requests.post(url_fb, timeout=timeout)
         r2.raise_for_status()
         return r2.json()
-
 
 def normalize_resp(resp):
     rows = []
@@ -301,12 +266,7 @@ def normalize_resp(resp):
     df["date"] = ts.dt.date
     df["hour"] = ts.dt.hour
     # map names after creation (faster)
-    try:
-        from shop_mapping import SHOP_NAME_MAP as _MAP2
-    except Exception:
-        _MAP2 = {}
-    _SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _MAP2.items() if str(v).strip()}
-    df["shop_name"] = df["shop_id"].map(_SHOP_ID_TO_NAME).fillna(df["shop_id"].astype(str))
+    df["shop_name"] = df["shop_id"].map(SHOP_ID_TO_NAME).fillna(df["shop_id"].astype(str))
     return df
 
 # =========================
@@ -323,68 +283,52 @@ if analyze:
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
 
     with st.spinner("Data ophalen…"):
-        resp = fetch_report(
-            API_URL,
-            shop_ids=shop_ids,
-            step=step,
-            outputs=outputs,
-            period_token=period_token,                 # presets → Vemcount
-            show_hours=(open_start, open_end)
-        )
-        df_raw = normalize_resp(resp)
-        if df_raw.empty:
+        resp = fetch_report(API_URL, shop_ids, date_from, date_to, step, outputs, show_hours=(open_start, open_end))
+        df = normalize_resp(resp)
+        if df.empty:
             st.info("Geen data beschikbaar voor de gekozen periode/granulariteit."); st.stop()
-
-    # --- Eén bron voor berekeningen
-    df = compute_csm2i_and_uplift(df_raw, ref_spv=0.0, csm2i_target=1.0)  # temp to normalize types
 
     # Referentie‑SPV (portfolio + uplift)
     mode = "portfolio"
     bm_id = None
     ref_spv = choose_ref_spv(df, mode=mode, benchmark_shop_id=bm_id, uplift_pct=spv_uplift_pct/100.0)
 
-    # Recompute with actual ref/target for correct uplift
-    df = compute_csm2i_and_uplift(df_raw, ref_spv=ref_spv, csm2i_target=csm2i_target)
+    # Uniforme CSm²I + uplift (CSm²I‑component)
+    df = compute_csm2i_and_uplift(df, ref_spv=ref_spv, csm2i_target=csm2i_target)
 
-    # Conversie‑uplift (gewogen gebaseerd op counts)
+    # Conversie‑uplift
     conv_target = float(conv_goal_pct) / 100.0
     df["uplift_eur_conv"] = np.maximum(0.0, (conv_target - df["conversion_rate"]) * df["count_in"]) * df["atv"]
 
-    # ===== Aggregatie per winkel (PERIODETrouw — onafhankelijk van granulariteit)
-    g = df.groupby(["shop_id","shop_name"], as_index=False).agg(
+    # Aggregatie per winkel
+    agg = df.groupby(["shop_id","shop_name"]).agg(
         visitors=("count_in","sum"),
         turnover=("turnover","sum"),
-        transactions=("transactions","sum"),
-        sqm=("sq_meter","mean"),  # aanname: constant per winkel
+        sqm=("sq_meter","mean"),
+        spsqm=("actual_spsqm","mean"),
+        csm2i=("csm2i","mean"),
+        spv=("actual_spv","mean"),
+        conv=("conversion_rate","mean"),
         uplift_csm=("uplift_eur_csm","sum"),
         uplift_conv=("uplift_eur_conv","sum"),
-    )
-    # Gewogen ratio's
-    g["spv"]  = g["turnover"] / (g["visitors"] + EPS)
-    g["conv"] = g["transactions"] / (g["visitors"] + EPS)
-    g["spsqm"] = g["turnover"] / (g["sqm"] + EPS)
-    # CSm²I opnieuw uit periode‑SPV
-    g["csm2i"] = g["spv"] / (float(ref_spv) + EPS)
-    # Safeguards
-    g["conv"] = g["conv"].clip(lower=0.0, upper=1.0)
-
-    g["uplift_total"] = g["uplift_csm"] + g["uplift_conv"]
+    ).reset_index()
+    agg["uplift_total"] = agg["uplift_csm"] + agg["uplift_conv"]
 
     # ===== KPI‑tegels =====
     k1, k2, k3 = st.columns(3)
     k1.markdown(
         f"""<div class="card"><div>🚀 <b>CSm²I potential</b><br/><small>({period_label}, target {csm2i_target:.2f})</small></div>
-            <div class="kpi eur">{fmt_eur(g["uplift_csm"].sum())}</div></div>""",
+            <div class="kpi eur">{fmt_eur(agg["uplift_csm"].sum())}</div></div>""",
         unsafe_allow_html=True
     )
     k2.markdown(
         f"""<div class="card"><div>🎯 <b>Conversion potential</b><br/><small>({period_label}, doel = {conv_goal_pct}%)</small></div>
-            <div class="kpi eur">{fmt_eur(g["uplift_conv"].sum())}</div></div>""",
+            <div class="kpi eur">{fmt_eur(agg["uplift_conv"].sum())}</div></div>""",
         unsafe_allow_html=True
     )
     k3.markdown(
         f"""<div class="card"><div>∑ <b>Total potential</b><br/><small>({period_label})</small></div>
-            <div class="kpi eur">{fmt_eur(g["uplift_total"].sum())}</div></div>""",
+            <div class="kpi eur">{fmt_eur(agg["uplift_total"].sum())}</div></div>""",
         unsafe_allow_html=True
     )
 
@@ -394,26 +338,25 @@ if analyze:
         f"""
         <div class="big-card">
           <div class="title">💰 Total extra potential in revenue</div>
-          <div class="value">{fmt_eur(g["uplift_total"].sum())}</div>
+          <div class="value">{fmt_eur(agg["uplift_total"].sum())}</div>
           <div class="mt-8">Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.</div>
         </div>
         """,
         unsafe_allow_html=True
     )
     if proj_toggle:
-        # resterende dagen dit jaar (projectie baseer je op # unieke dagen in dataset)
+        # resterende dagen dit jaar
         today2 = date.today()
         end_year = date(today2.year, 12, 31)
         rem_days = (end_year - today2).days
-
-        try:
-            days_in_period = int(pd.to_datetime(df["date"], errors="coerce").nunique())
-            if days_in_period <= 0:
-                days_in_period = 1
-        except Exception:
-            days_in_period = 1
-
-        daily_potential = g["uplift_total"].sum() / max(1, days_in_period)
+        # dag-equivalent van gekozen periode
+        if period_label == "last_month":
+            days_in_period = (date_to - date_from).days + 1
+        elif period_label == "30 dagen":
+            days_in_period = 30
+        else:
+            days_in_period = 7
+        daily_potential = agg["uplift_total"].sum() / max(1, days_in_period)
         projection = daily_potential * max(0, rem_days)
         cB.markdown(
             f"""
@@ -438,7 +381,7 @@ if analyze:
         )
 
     # ===== Scatter: SPV vs Sales per m² (kleur = CSm²I t.o.v. target) =====
-    rad = g.copy()
+    rad = agg.copy()
     low_thr  = float(csm2i_target) * 0.95
     high_thr = float(csm2i_target) * 1.05
     rad["csm2i_band"] = np.select(
@@ -485,9 +428,9 @@ if analyze:
     # ===== Aanbevelingen per winkel =====
     st.markdown("## Aanbevelingen per winkel")
     # benchmark SPV (best performer) t.b.v. vergelijk
-    best_spv = g.loc[g["spv"].idxmax(), "spv"] if not g.empty else 0.0
+    best_spv = agg.loc[agg["spv"].idxmax(), "spv"] if not agg.empty else 0.0
 
-    for _, row in g.sort_values("uplift_total", ascending=False).iterrows():
+    for _, row in agg.sort_values("uplift_total", ascending=False).iterrows():
         name = row["shop_name"]; sid = int(row["shop_id"])
         csi = float(row["csm2i"]); spv_store = float(row["spv"]); spsqm_store = float(row["spsqm"])
         conv_store = float(row["conv"])
@@ -528,139 +471,59 @@ if analyze:
             st.write(f"- {b}")
         st.markdown("---")
 
-    # ===== Multi‑store hour drilldown (vergelijking) =====
-    if step == "hour":
-        st.markdown("## 🔎 Multi‑store hour drilldown (vergelijking)")
-        st.caption("Gemiddelden per uur over de gekozen periode, gewogen op bezoekers. Handig voor snelle vergelijking tussen vestigingen.")
-        sub_all = df.copy()
-        sub_all = sub_all[(sub_all['hour'] >= open_start) & (sub_all['hour'] < open_end)]
-        sub_all['date_ts'] = pd.to_datetime(sub_all['date'], errors='coerce')
-        sub_all = sub_all.dropna(subset=['date_ts'])
-        # per store-hour: sommen + dagen aanwezig → gewogen metrics
-        grp_all = sub_all.groupby(['shop_id','shop_name','hour'], as_index=False).agg(
-            visitors_sum=('count_in','sum'),
-            turnover_sum=('turnover','sum'),
-            transactions_sum=('transactions','sum'),
-            days_present=('date_ts','nunique'),
-        )
-        grp_all['visitors_avg'] = grp_all['visitors_sum'] / grp_all['days_present'].replace(0, np.nan)
-        grp_all['spv_hour'] = grp_all['turnover_sum'] / (grp_all['visitors_sum'] + 1e-9)
-        grp_all['conv_hour'] = grp_all['transactions_sum'] / (grp_all['visitors_sum'] + 1e-9)
-        # Tabs voor 3 perspectieven
-        t1, t2, t3 = st.tabs(["Bezoekers/uur", "SPV/uur", "Conversie/uur"])
-        with t1:
-            fig1 = px.bar(grp_all, x='hour', y='visitors_avg', color='shop_name', barmode='group', labels={'visitors_avg':'Gem. bezoekers'})
-            fig1.update_layout(height=360, margin=dict(l=20,r=20,t=10,b=10), xaxis=dict(dtick=1))
-            st.plotly_chart(fig1, use_container_width=True)
-        with t2:
-            fig2 = px.line(grp_all, x='hour', y='spv_hour', color='shop_name', markers=True, labels={'spv_hour':'SPV (€)'})
-            fig2.update_layout(height=360, margin=dict(l=20,r=20,t=10,b=10), xaxis=dict(dtick=1), yaxis=dict(tickformat=',.2f'))
-            st.plotly_chart(fig2, use_container_width=True)
-        with t3:
-            dfc = grp_all.copy(); dfc['conv_pct'] = dfc['conv_hour']*100
-            fig3 = px.line(dfc, x='hour', y='conv_pct', color='shop_name', markers=True, labels={'conv_pct':'Conversie (%)'})
-            fig3.update_layout(height=360, margin=dict(l=20,r=20,t=10,b=10), xaxis=dict(dtick=1), yaxis=dict(tickformat=',.1f'))
-            st.plotly_chart(fig3, use_container_width=True)
-
-        # Optie: individuele secties tonen/verbergen
-        show_individual = st.toggle('Toon individuele vestigingen (uurprofielen & heatmaps)', value=True)
-
     # ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
-    if step == "hour" and show_individual:
+    if step == "hour":
         st.markdown("## Uur‑profielen (drill‑down & heatmap)")
         st.caption(f"Heatmap binnen openingstijd {open_start:02d}:00–{open_end:02d}:00 (gemiddeld in de gekozen periode).")
 
-        for _, row in g.iterrows():
+        # Per winkel: lijnchart (SPV & conversie) en heatmap (bezoekers)
+        for _, row in agg.iterrows():
             sid = int(row["shop_id"]); name = row["shop_name"]
-            sub = df[(df["shop_id"] == sid)].copy()
+            sub = df[df["shop_id"] == sid].copy()
             if sub.empty:
                 continue
             sub = normalize_kpis(sub)
             sub = sub[(sub["hour"] >= open_start) & (sub["hour"] < open_end)]
-            sub["date_ts"] = pd.to_datetime(sub["date"])  # for #days
 
             with st.expander(f"⏱️ {name} — uurprofiel & heatmap", expanded=False):
-                # ===== Per uur (gewogen)
-                grp_h = sub.groupby("hour", as_index=False).agg(
-                    visitors_sum=("count_in","sum"),
-                    turnover_sum=("turnover","sum"),
-                    transactions_sum=("transactions","sum"),
-                    days_present=("date_ts","nunique"),
-                ).sort_values("hour")
-                grp_h["visitors_avg"] = grp_h["visitors_sum"] / grp_h["days_present"].replace(0, np.nan)
-                grp_h["spv_hour"] = grp_h["turnover_sum"] / (grp_h["visitors_sum"] + EPS)
-                grp_h["conv_hour"] = grp_h["transactions_sum"] / (grp_h["visitors_sum"] + EPS)
-
-                # Hovertext (EU‑notatie)
-                grp_h["visitors_txt"] = grp_h["visitors_avg"].round(0).apply(fmt_int) + " bezoekers"
-                grp_h["spv_txt"] = grp_h["spv_hour"].apply(fmt_eur2)
-                grp_h["conv_txt"] = grp_h["conv_hour"].apply(lambda v: fmt_pct(v, 1))
-                custom_bar = np.stack([grp_h["visitors_txt"], grp_h["spv_txt"], grp_h["conv_txt"]], axis=1)
-                custom_spv = np.stack([grp_h["spv_txt"].values], axis=1)
-                custom_conv = np.stack([grp_h["conv_txt"].values], axis=1)
+                # Lijnplot SPV/Conversie per uur (gemiddeld over dagen)
+                per_hour = sub.groupby("hour").agg(
+                    visitors=("count_in","sum"),
+                    spv=("sales_per_visitor","mean"),
+                    conv=("conversion_rate","mean"),
+                ).reset_index().sort_values("hour")
 
                 fig = go.Figure()
-                fig.add_trace(go.Bar(
-                    x=grp_h["hour"], y=grp_h["visitors_avg"], name="Bezoekers (gem.)", yaxis="y2", opacity=0.30,
-                    customdata=custom_bar,
-                    hovertemplate="Uur %{x:02d}:00<br>%{customdata[0]}<br>SPV: %{customdata[1]}<br>Conversie: %{customdata[2]}<extra></extra>",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=grp_h["hour"], y=grp_h["spv_hour"], name="SPV (€)", mode="lines+markers",
-                    customdata=custom_spv,
-                    hovertemplate="Uur %{x:02d}:00<br>SPV: %{customdata[0]}<extra></extra>",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=grp_h["hour"], y=grp_h["conv_hour"]*100, name="Conversie (%)", mode="lines+markers",
-                    customdata=custom_conv,
-                    hovertemplate="Uur %{x:02d}:00<br>Conversie: %{customdata[0]}<extra></extra>",
-                ))
+                fig.add_trace(go.Bar(x=per_hour["hour"], y=per_hour["visitors"], name="Bezoekers", yaxis="y2", opacity=0.30))
+                fig.add_trace(go.Scatter(x=per_hour["hour"], y=per_hour["spv"], name="SPV (€)", mode="lines+markers"))
+                fig.add_trace(go.Scatter(x=per_hour["hour"], y=per_hour["conv"]*100, name="Conversie (%)", mode="lines+markers"))
                 fig.update_layout(
-                    height=380, margin=dict(l=20,r=20,t=10,b=10),
-                    xaxis=dict(title="Uur", tickmode='linear', dtick=1),
+                    height=360, margin=dict(l=20,r=20,t=10,b=10),
+                    xaxis=dict(title="Uur"),
                     yaxis=dict(title="SPV (€) / Conversie (%)", rangemode="tozero"),
-                    yaxis2=dict(title="Bezoekers (gem.)", overlaying="y", side="right", rangemode="tozero"),
+                    yaxis2=dict(title="Bezoekers", overlaying="y", side="right", rangemode="tozero"),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-                # ===== Heatmap bezoekers
-                sub = sub.dropna(subset=["date"]).copy()
-                sub["date_ts"] = pd.to_datetime(sub["date"], errors="coerce")
-                sub = sub.dropna(subset=["date_ts"]).copy()
-                sub["weekday_en"] = sub["date_ts"].dt.day_name()
-                sub["weekday_en"] = pd.Categorical(sub["weekday_en"], ordered=True, categories=WEEKDAY_ORDER_EN)
-
-                grp_wh = sub.groupby(["weekday_en","hour"], observed=True, as_index=False).agg(
-                    visitors_sum=("count_in","sum"),
-                    days_present=("date_ts","nunique"),
-                )
-                grp_wh["visitors_avg"] = grp_wh["visitors_sum"] / grp_wh["days_present"].replace(0, np.nan)
-                grp_wh["weekday_nl"] = grp_wh["weekday_en"].astype(str).map(lambda d: WEEKDAY_EN_TO_NL.get(d, d))
-
-                pivot = grp_wh.pivot_table(index="weekday_nl", columns="hour", values="visitors_avg", aggfunc="mean")
-                pivot = pivot.reindex(WEEKDAY_ORDER_NL)
-                pivot = pivot.fillna(0)
-
+                # Heatmap bezoekers: uur x weekdag (gemiddelde bezoekers)
+                sub["weekday"] = pd.to_datetime(sub["date"]).map(lambda d: pd.Timestamp(d).day_name())
+                ordered_days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+                sub["weekday"] = pd.Categorical(sub["weekday"], ordered=True, categories=ordered_days)
+                pivot = sub.pivot_table(index="weekday", columns="hour", values="count_in", aggfunc="mean").fillna(0)
                 if pivot.empty:
                     st.info("Binnen de opgegeven openingstijd is geen uurdata.")
                 else:
-                    hours_sorted = sorted(pivot.columns.tolist())
-                    pivot = pivot[hours_sorted]
-                    text_matrix = [[f"{rowlabel} {int(col):02d}:00 — {fmt_int(val)} bezoekers" for col, val in zip(pivot.columns, row)] for rowlabel, row in zip(pivot.index, pivot.values)]
-
                     fig_hm = go.Figure(data=go.Heatmap(
                         z=pivot.values,
                         x=pivot.columns,
                         y=pivot.index,
                         colorscale="Viridis",
-                        colorbar=dict(title="Gem. bezoekers"),
-                        text=text_matrix,
-                        hovertemplate="%{text}<extra></extra>",
+                        colorbar=dict(title="Gem. bezoekers")
                     ))
                     fig_hm.update_layout(
-                        height=360, margin=dict(l=20,r=20,t=10,b=10),
-                        xaxis=dict(title="Uur", tickmode='linear', dtick=1),
+                        height=340, margin=dict(l=20,r=20,t=10,b=10),
+                        xaxis=dict(title="Uur"),
                         yaxis=dict(title="Weekdag"),
                     )
                     st.plotly_chart(fig_hm, use_container_width=True)
@@ -668,8 +531,9 @@ if analyze:
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
         dbg = {
-            "period_token": period_token,
             "period_step": step,
+            "from": str(date_from),
+            "to": str(date_to),
             "shop_ids": shop_ids,
             "ref_spv": ref_spv,
             "csm2i_target": csm2i_target,
