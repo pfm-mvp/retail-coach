@@ -175,6 +175,12 @@ def compute_csm2i_and_uplift(df: pd.DataFrame, ref_spv: float, csm2i_target: flo
 # =========================
 # Shop mapping
 # =========================
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+_MAP = {}
+_import_err = None
 try:
     from shop_mapping import SHOP_NAME_MAP as _MAP  # {id:int: "Naam"}
 except Exception:
