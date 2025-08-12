@@ -188,70 +188,21 @@ names = sorted(NAME_TO_ID.keys(), key=str.lower)
 # =========================
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    # ---- Alleen dit blok is aangepast: presets + datumafleiding per preset
-    PERIOD_OPTIONS = [
-        "Last week",
-        "This month",
-        "Last month",
-        "This quarter",
-        "Last quarter",
-        "This year",
-        "Last year",
-    ]
-    period_label = st.selectbox("Periode", PERIOD_OPTIONS, index=1)
-
+    period_label = st.selectbox("Periode", ["7 dagen", "30 dagen", "last_month"], index=0)
 with c2:
     gran = st.selectbox("Granulariteit", ["Dag", "Uur"], index=0)
 with c3:
     proj_toggle = st.toggle("Toon projectie voor resterend jaar", value=False)
 
-# datums (afgeleid per preset; API blijft 'period=date' gebruiken met from/to)
+# datums
 today = date.today()
-
-def month_start(d: date) -> date:
-    return d.replace(day=1)
-
-def month_end(d: date) -> date:
-    return (d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-
-def quarter_start(d: date) -> date:
-    q = (d.month - 1) // 3
-    m = 1 + 3*q
-    return date(d.year, m, 1)
-
-def quarter_end(d: date) -> date:
-    qs = quarter_start(d)
-    return month_end(qs.replace(month=qs.month + 2))
-
-def prev_quarter_range(d: date):
-    qs = quarter_start(d)
-    last_day_prev_q = qs - timedelta(days=1)
-    start_prev_q = quarter_start(last_day_prev_q)
-    end_prev_q = quarter_end(last_day_prev_q)
-    return start_prev_q, end_prev_q
-
-if period_label == "Last week":
-    # vorige kalenderweek (ma-zo)
-    weekday = today.weekday()  # Monday=0
-    last_monday = today - timedelta(days=weekday + 7)
-    last_sunday = last_monday + timedelta(days=6)
-    date_from, date_to = last_monday, last_sunday
-elif period_label == "This month":
-    date_from, date_to = month_start(today), today - timedelta(days=1)
-elif period_label == "Last month":
-    first_this = month_start(today)
-    last_prev = first_this - timedelta(days=1)
-    date_from, date_to = month_start(last_prev), last_prev
-elif period_label == "This quarter":
-    date_from, date_to = quarter_start(today), today - timedelta(days=1)
-elif period_label == "Last quarter":
-    date_from, date_to = prev_quarter_range(today)
-elif period_label == "This year":
-    date_from, date_to = date(today.year, 1, 1), today - timedelta(days=1)
-elif period_label == "Last year":
-    date_from, date_to = date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
+if period_label == "last_month":
+    first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    last  = today.replace(day=1) - timedelta(days=1)
+    date_from, date_to = first, last
+elif period_label == "30 dagen":
+    date_from, date_to = today - timedelta(days=30), today - timedelta(days=1)
 else:
-    # fallback (zou niet moeten gebeuren)
     date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
 
 c4, c5, c6 = st.columns([1,1,1])
@@ -448,8 +399,12 @@ if analyze:
         end_year = date(today2.year, 12, 31)
         rem_days = (end_year - today2).days
         # dag-equivalent van gekozen periode
-        # (benaderd via datumbereik; consistent met period=date)
-        days_in_period = (date_to - date_from).days + 1
+        if period_label == "last_month":
+            days_in_period = (date_to - date_from).days + 1
+        elif period_label == "30 dagen":
+            days_in_period = 30
+        else:
+            days_in_period = 7
         daily_potential = g["uplift_total"].sum() / max(1, days_in_period)
         projection = daily_potential * max(0, rem_days)
         cB.markdown(
