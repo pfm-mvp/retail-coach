@@ -71,14 +71,14 @@ WEEKDAY_ORDER_NL = [WEEKDAY_EN_TO_NL[d] for d in WEEKDAY_ORDER_EN]
 
 def fmt_eur(x: float) -> str:
     try:
-        return ("€{:,.0f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X", ".")
+        return ("€{:,.0f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X",".")
     except Exception:
         return "€0"
 
 
 def fmt_eur2(x: float) -> str:
     try:
-        return ("€{:,.2f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X", ".")
+        return ("€{:,.2f}".format(float(x))).replace(",", "X").replace(".", ",").replace("X",".")
     except Exception:
         return "€0,00"
 
@@ -343,7 +343,7 @@ if analyze:
     conv_target = float(conv_goal_pct) / 100.0
     df["uplift_eur_conv"] = np.maximum(0.0, (conv_target - df["conversion_rate"]) * df["count_in"]) * df["atv"]
 
-    # ===== Aggregatie per winkel (PERIODETRouw — onafhankelijk van granulariteit)
+    # ===== Aggregatie per winkel (PERIODETrouw — onafhankelijk van granulariteit)
     g = df.groupby(["shop_id","shop_name"], as_index=False).agg(
         visitors=("count_in","sum"),
         turnover=("turnover","sum"),
@@ -366,18 +366,18 @@ if analyze:
     # ===== KPI‑tegels =====
     k1, k2, k3 = st.columns(3)
     k1.markdown(
-        f"""<div class=\"card\"><div>🚀 <b>CSm²I potential</b><br/><small>({period_label}, target {csm2i_target:.2f})</small></div>
-            <div class=\"kpi eur\">{fmt_eur(g['uplift_csm'].sum())}</div></div>""",
+        f"""<div class="card"><div>🚀 <b>CSm²I potential</b><br/><small>({period_label}, target {csm2i_target:.2f})</small></div>
+            <div class="kpi eur">{fmt_eur(g["uplift_csm"].sum())}</div></div>""",
         unsafe_allow_html=True
     )
     k2.markdown(
-        f"""<div class=\"card\"><div>🎯 <b>Conversion potential</b><br/><small>({period_label}, doel = {conv_goal_pct}%)</small></div>
-            <div class=\"kpi eur\">{fmt_eur(g['uplift_conv'].sum())}</div></div>""",
+        f"""<div class="card"><div>🎯 <b>Conversion potential</b><br/><small>({period_label}, doel = {conv_goal_pct}%)</small></div>
+            <div class="kpi eur">{fmt_eur(g["uplift_conv"].sum())}</div></div>""",
         unsafe_allow_html=True
     )
     k3.markdown(
-        f"""<div class=\"card\"><div>∑ <b>Total potential</b><br/><small>({period_label})</small></div>
-            <div class=\"kpi eur\">{fmt_eur(g['uplift_total'].sum())}</div></div>""",
+        f"""<div class="card"><div>∑ <b>Total potential</b><br/><small>({period_label})</small></div>
+            <div class="kpi eur">{fmt_eur(g["uplift_total"].sum())}</div></div>""",
         unsafe_allow_html=True
     )
 
@@ -385,10 +385,10 @@ if analyze:
     cA, cB = st.columns([1,1])
     cA.markdown(
         f"""
-        <div class=\"big-card\">
-          <div class=\"title\">💰 Total extra potential in revenue</div>
-          <div class=\"value\">{fmt_eur(g['uplift_total'].sum())}</div>
-          <div class=\"mt-8\">Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.</div>
+        <div class="big-card">
+          <div class="title">💰 Total extra potential in revenue</div>
+          <div class="value">{fmt_eur(g["uplift_total"].sum())}</div>
+          <div class="mt-8">Som van CSm²I‑ en conversie‑potentieel voor de geselecteerde periode.</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -409,10 +409,10 @@ if analyze:
         projection = daily_potential * max(0, rem_days)
         cB.markdown(
             f"""
-            <div class=\"big-card\">
-              <div class=\"title\">📈 Projectie resterend jaar</div>
-              <div class=\"value\">{fmt_eur(projection)}</div>
-              <div class=\"mt-8\">Huidig potentieel × resterende dagen dit jaar.</div>
+            <div class="big-card">
+              <div class="title">📈 Projectie resterend jaar</div>
+              <div class="value">{fmt_eur(projection)}</div>
+              <div class="mt-8">Huidig potentieel × resterende dagen dit jaar.</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -420,10 +420,10 @@ if analyze:
     else:
         cB.markdown(
             f"""
-            <div class=\"big-card\">
-              <div class=\"title\">📈 Projectie resterend jaar</div>
-              <div class=\"value\">–</div>
-              <div class=\"mt-8\">Schakel bovenaan in om projectie te tonen.</div>
+            <div class="big-card">
+              <div class="title">📈 Projectie resterend jaar</div>
+              <div class="value">–</div>
+              <div class="mt-8">Schakel bovenaan in om projectie te tonen.</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -520,8 +520,45 @@ if analyze:
             st.write(f"- {b}")
         st.markdown("---")
 
-    # ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
+    # ===== Multi‑store hour drilldown (vergelijking) =====
     if step == "hour":
+        st.markdown("## 🔎 Multi‑store hour drilldown (vergelijking)")
+        st.caption("Gemiddelden per uur over de gekozen periode, gewogen op bezoekers. Handig voor snelle vergelijking tussen vestigingen.")
+        sub_all = df.copy()
+        sub_all = sub_all[(sub_all['hour'] >= open_start) & (sub_all['hour'] < open_end)]
+        sub_all['date_ts'] = pd.to_datetime(sub_all['date'], errors='coerce')
+        sub_all = sub_all.dropna(subset=['date_ts'])
+        # per store-hour: sommen + dagen aanwezig → gewogen metrics
+        grp_all = sub_all.groupby(['shop_id','shop_name','hour'], as_index=False).agg(
+            visitors_sum=('count_in','sum'),
+            turnover_sum=('turnover','sum'),
+            transactions_sum=('transactions','sum'),
+            days_present=('date_ts','nunique'),
+        )
+        grp_all['visitors_avg'] = grp_all['visitors_sum'] / grp_all['days_present'].replace(0, np.nan)
+        grp_all['spv_hour'] = grp_all['turnover_sum'] / (grp_all['visitors_sum'] + 1e-9)
+        grp_all['conv_hour'] = grp_all['transactions_sum'] / (grp_all['visitors_sum'] + 1e-9)
+        # Tabs voor 3 perspectieven
+        t1, t2, t3 = st.tabs(["Bezoekers/uur", "SPV/uur", "Conversie/uur"])
+        with t1:
+            fig1 = px.bar(grp_all, x='hour', y='visitors_avg', color='shop_name', barmode='group', labels={'visitors_avg':'Gem. bezoekers'})
+            fig1.update_layout(height=360, margin=dict(l=20,r=20,t=10,b=10), xaxis=dict(dtick=1))
+            st.plotly_chart(fig1, use_container_width=True)
+        with t2:
+            fig2 = px.line(grp_all, x='hour', y='spv_hour', color='shop_name', markers=True, labels={'spv_hour':'SPV (€)'})
+            fig2.update_layout(height=360, margin=dict(l=20,r=20,t=10,b=10), xaxis=dict(dtick=1), yaxis=dict(tickformat=',.2f'))
+            st.plotly_chart(fig2, use_container_width=True)
+        with t3:
+            dfc = grp_all.copy(); dfc['conv_pct'] = dfc['conv_hour']*100
+            fig3 = px.line(dfc, x='hour', y='conv_pct', color='shop_name', markers=True, labels={'conv_pct':'Conversie (%)'})
+            fig3.update_layout(height=360, margin=dict(l=20,r=20,t=10,b=10), xaxis=dict(dtick=1), yaxis=dict(tickformat=',.1f'))
+            st.plotly_chart(fig3, use_container_width=True)
+
+        # Optie: individuele secties tonen/verbergen
+        show_individual = st.toggle('Toon individuele vestigingen (uurprofielen & heatmaps)', value=True)
+
+# ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
+    if step == "hour" and show_individual:
         st.markdown("## Uur‑profielen (drill‑down & heatmap)")
         st.caption(f"Heatmap binnen openingstijd {open_start:02d}:00–{open_end:02d}:00 (gemiddeld in de gekozen periode).")
 
@@ -535,7 +572,7 @@ if analyze:
             sub["date_ts"] = pd.to_datetime(sub["date"])  # for #days
 
             with st.expander(f"⏱️ {name} — uurprofiel & heatmap", expanded=False):
-                # ===== Per uur (gewogen): visitors avg per uur; SPV & conversie gewogen
+                # ===== Per uur (gewogen)
                 grp_h = sub.groupby("hour", as_index=False).agg(
                     visitors_sum=("count_in","sum"),
                     turnover_sum=("turnover","sum"),
@@ -579,27 +616,20 @@ if analyze:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-                # ===== Heatmap bezoekers: weekday x hour (gemiddeld per weekday‑uur)
-                # Zorg dat 'date' aanwezig en valide is
+                # ===== Heatmap bezoekers
                 sub = sub.dropna(subset=["date"]).copy()
                 sub["date_ts"] = pd.to_datetime(sub["date"], errors="coerce")
                 sub = sub.dropna(subset=["date_ts"]).copy()
-
-                # Engelstalige weekday voor ordening; NL-labels na aggregatie toevoegen
                 sub["weekday_en"] = sub["date_ts"].dt.day_name()
                 sub["weekday_en"] = pd.Categorical(sub["weekday_en"], ordered=True, categories=WEEKDAY_ORDER_EN)
 
-                # Robuuste gemiddelde per weekday-uur over het aantal dagen dat die combi voorkomt
                 grp_wh = sub.groupby(["weekday_en","hour"], observed=True, as_index=False).agg(
                     visitors_sum=("count_in","sum"),
                     days_present=("date_ts","nunique"),
                 )
                 grp_wh["visitors_avg"] = grp_wh["visitors_sum"] / grp_wh["days_present"].replace(0, np.nan)
-
-                # NL-labels toevoegen NA aggregatie om length-mismatch te voorkomen
                 grp_wh["weekday_nl"] = grp_wh["weekday_en"].astype(str).map(lambda d: WEEKDAY_EN_TO_NL.get(d, d))
 
-                # Pivot op NL labels, maar reindex volgens vaste volgorde
                 pivot = grp_wh.pivot_table(index="weekday_nl", columns="hour", values="visitors_avg", aggfunc="mean")
                 pivot = pivot.reindex(WEEKDAY_ORDER_NL)
                 pivot = pivot.fillna(0)
@@ -607,7 +637,6 @@ if analyze:
                 if pivot.empty:
                     st.info("Binnen de opgegeven openingstijd is geen uurdata.")
                 else:
-                    # Teksten voor hover
                     hours_sorted = sorted(pivot.columns.tolist())
                     pivot = pivot[hours_sorted]
                     text_matrix = [[f"{rowlabel} {int(col):02d}:00 — {fmt_int(val)} bezoekers" for col, val in zip(pivot.columns, row)] for rowlabel, row in zip(pivot.index, pivot.values)]
