@@ -208,15 +208,77 @@ if gran.lower().startswith("u"):
 analyze = st.button("🔍 Analyseer", type="secondary")
 
 # =========================
-# API helpers
+# API helpers (met fallback voor array-params)
 # =========================
+import json
+
+def _has_useful_metrics(resp_json: dict) -> bool:
+    """Checkt of er meer dan alleen sq_meter terugkomt."""
+    try:
+        data = resp_json.get("data", {})
+        for _, shops in data.items():
+            for _, payload in shops.items():
+                dates = (payload or {}).get("dates", {})
+                for _, obj in dates.items():
+                    fields = set(((obj or {}).get("data", {}) or {}).keys())
+                    # als we iig 1 van de kernmetrics zien, is het oké
+                    if fields & {"count_in", "transactions", "turnover", "conversion_rate", "sales_per_visitor"}:
+                        return True
+        return False
+    except Exception:
+        return False
+
 def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, timeout=60):
-    params = [("source","shops"), ("period","date"),
-              ("form_date_from",str(dfrom)), ("form_date_to",str(dto)), ("period_step",step)]
-    for sid in shop_ids: params.append(("data", int(sid)))
-    for outp in outputs: params.append(("data_output", outp))
-    r = requests.post(api_url, params=params, timeout=timeout); r.raise_for_status()
-    return r.json()
+    """
+    Probeert eerst zonder brackets (data=..., data_output=...).
+    Als dat geen bruikbare metrics oplevert, probeert met brackets (data[]=..., data_output[]=...).
+    """
+    base_params = [
+        ("source", "shops"),
+        ("period", "date"),
+        ("form_date_from", str(dfrom)),
+        ("form_date_to", str(dto)),
+        ("period_step", step),
+    ]
+
+    # --- poging 1: plain (herhaalde sleutels) ---
+    params_plain = list(base_params)
+    for sid in shop_ids:
+        params_plain.append(("data", int(sid)))
+    for outp in outputs:
+        params_plain.append(("data_output", outp))
+
+    try:
+        r1 = requests.post(api_url, params=params_plain, timeout=timeout)
+        r1.raise_for_status()
+        j1 = r1.json()
+    except Exception as e:
+        j1 = {}
+
+    if _has_useful_metrics(j1):
+        st.session_state["api_param_mode"] = "plain"
+        return j1
+
+    # --- poging 2: brackets (arrays) ---
+    # Sommige backends verwachten expliciet data[]=... en data_output[]=...
+    params_brackets = list(base_params)
+    for sid in shop_ids:
+        params_brackets.append(("data[]", int(sid)))
+    for outp in outputs:
+        params_brackets.append(("data_output[]", outp))
+
+    r2 = requests.post(api_url, params=params_brackets, timeout=timeout)
+    r2.raise_for_status()
+    j2 = r2.json()
+
+    # Noteer welke we gebruikt hebben voor debug
+    if _has_useful_metrics(j2):
+        st.session_state["api_param_mode"] = "brackets"
+        return j2
+
+    # als beiden niet bruikbaar waren, toon de 'beste' die we hebben (met uitleg)
+    st.session_state["api_param_mode"] = "unknown"
+    return j2 if j2 else j1
 
 def normalize_resp(resp):
     rows = []
@@ -526,5 +588,6 @@ if analyze:
             "conv_goal_pct": conv_goal_pct,
             "open_hours": (open_start, open_end) if step == "hour" else None,
             "heatmap_metric": metric_for_heatmap if step == "hour" else None,
+            "api_param_mode": st.session_state.get("api_param_mode"),
         }
         st.json(dbg)
