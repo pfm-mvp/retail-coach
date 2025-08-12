@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import date, timedelta
+from datetime import date
 import plotly.express as px
 import plotly.graph_objects as go
 from urllib.parse import urlencode
@@ -186,73 +186,24 @@ names = sorted(NAME_TO_ID.keys(), key=str.lower)
 # =========================
 # UI – periode, granulariteit, winkels, targets
 # =========================
+PERIOD_OPTIONS = [
+    ("Last week",   "last_week"),
+    ("This month",  "this_month"),
+    ("Last month",  "last_month"),
+    ("This quarter","this_quarter"),
+    ("Last quarter","last_quarter"),
+    ("This year",   "this_year"),
+    ("Last year",   "last_year"),
+]
+
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    # ---- Alleen dit blok is aangepast: presets + datumafleiding per preset
-    PERIOD_OPTIONS = [
-        "Last week",
-        "This month",
-        "Last month",
-        "This quarter",
-        "Last quarter",
-        "This year",
-        "Last year",
-    ]
-    period_label = st.selectbox("Periode", PERIOD_OPTIONS, index=1)
-
+    period_label = st.selectbox("Periode", [lbl for (lbl, _) in PERIOD_OPTIONS], index=1)
+    period_token = dict(PERIOD_OPTIONS)[period_label]
 with c2:
     gran = st.selectbox("Granulariteit", ["Dag", "Uur"], index=0)
 with c3:
     proj_toggle = st.toggle("Toon projectie voor resterend jaar", value=False)
-
-# datums (afgeleid per preset; API blijft 'period=date' gebruiken met from/to)
-today = date.today()
-
-def month_start(d: date) -> date:
-    return d.replace(day=1)
-
-def month_end(d: date) -> date:
-    return (d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-
-def quarter_start(d: date) -> date:
-    q = (d.month - 1) // 3
-    m = 1 + 3*q
-    return date(d.year, m, 1)
-
-def quarter_end(d: date) -> date:
-    qs = quarter_start(d)
-    return month_end(qs.replace(month=qs.month + 2))
-
-def prev_quarter_range(d: date):
-    qs = quarter_start(d)
-    last_day_prev_q = qs - timedelta(days=1)
-    start_prev_q = quarter_start(last_day_prev_q)
-    end_prev_q = quarter_end(last_day_prev_q)
-    return start_prev_q, end_prev_q
-
-if period_label == "Last week":
-    # vorige kalenderweek (ma-zo)
-    weekday = today.weekday()  # Monday=0
-    last_monday = today - timedelta(days=weekday + 7)
-    last_sunday = last_monday + timedelta(days=6)
-    date_from, date_to = last_monday, last_sunday
-elif period_label == "This month":
-    date_from, date_to = month_start(today), today - timedelta(days=1)
-elif period_label == "Last month":
-    first_this = month_start(today)
-    last_prev = first_this - timedelta(days=1)
-    date_from, date_to = month_start(last_prev), last_prev
-elif period_label == "This quarter":
-    date_from, date_to = quarter_start(today), today - timedelta(days=1)
-elif period_label == "Last quarter":
-    date_from, date_to = prev_quarter_range(today)
-elif period_label == "This year":
-    date_from, date_to = date(today.year, 1, 1), today - timedelta(days=1)
-elif period_label == "Last year":
-    date_from, date_to = date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
-else:
-    # fallback (zou niet moeten gebeuren)
-    date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
 
 c4, c5, c6 = st.columns([1,1,1])
 with c4:
@@ -276,21 +227,23 @@ open_start, open_end = st.slider(
 analyze = st.button("🔍 Analyseer", type="secondary")
 
 # =========================
-# API helper (robust encoder + fallback)
+# API helper (presets-first, robust fallback)
 # =========================
-def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, show_hours=None, timeout=60):
+def fetch_report(api_url, shop_ids, step, outputs, period_token=None, dfrom=None, dto=None, show_hours=None, timeout=60):
     """
-    Primary: repeat keys (data, data_output) + step=hour|day  -> like Dead Hour app.
-    Fallback: bracketed keys (data[], data_output[]) + period_step=... if the server rejects primary.
+    Primary: repeat keys (data, data_output) + step=hour|day + period=<token>  (Vemcount presets)
+    Fallback: bracketed keys + period_step=... for server quirks.
+    If period_token is None and dates given -> uses period=date with form_date_from/to.
     """
+    use_dates = (period_token is None or period_token == "date")
+
     # --- primary (repeat keys, step)
-    params = [
-        ("source", "shops"),
-        ("period", "date"),
-        ("form_date_from", str(dfrom)),
-        ("form_date_to", str(dto)),
-        ("step", step),
-    ]
+    params = [("source", "shops"), ("step", step)]
+    if use_dates and dfrom and dto:
+        params.extend([("period","date"), ("form_date_from", str(dfrom)), ("form_date_to", str(dto))])
+    else:
+        params.append(("period", period_token or "this_month"))
+
     for sid in shop_ids:
         params.append(("data", int(sid)))
     for outp in outputs:
@@ -300,24 +253,22 @@ def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, show_hours=None, 
         params.append(("show_hours_from", f"{sh:02d}:00"))
         params.append(("show_hours_to",   f"{eh:02d}:00"))
 
-    # Build URL manually to preserve repeated keys exactly like Dead Hour
+    # Build URL manually to preserve repeated keys
     qs = urlencode(params, doseq=True).replace("%3A", ":")
     url = f"{api_url}?{qs}"
 
-    # Try primary
     r = requests.post(url, timeout=timeout)
     try:
         r.raise_for_status()
         return r.json()
     except requests.HTTPError:
         # --- fallback (bracket keys + period_step)
-        params_fb = [
-            ("source", "shops"),
-            ("period", "date"),
-            ("form_date_from", str(dfrom)),
-            ("form_date_to", str(dto)),
-            ("period_step", step),
-        ]
+        params_fb = [("source","shops"), ("period_step", step)]
+        if use_dates and dfrom and dto:
+            params_fb.extend([("period","date"), ("form_date_from", str(dfrom)), ("form_date_to", str(dto))])
+        else:
+            params_fb.append(("period", period_token or "this_month"))
+
         for sid in shop_ids:
             params_fb.append(("data[]", int(sid)))
         for outp in outputs:
@@ -366,13 +317,20 @@ if analyze:
         st.warning("Selecteer minimaal één winkel."); st.stop()
     API_URL = st.secrets.get("API_URL","").rstrip("/")
     if not API_URL:
-        st.warning("Stel API_URL in via .streamlit/secrets.toml"); st.stop()
+        st.warning("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
 
     step = "hour" if gran.lower().startswith("u") else "day"
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
 
     with st.spinner("Data ophalen…"):
-        resp = fetch_report(API_URL, shop_ids, date_from, date_to, step, outputs, show_hours=(open_start, open_end))
+        resp = fetch_report(
+            API_URL,
+            shop_ids=shop_ids,
+            step=step,
+            outputs=outputs,
+            period_token=period_token,                 # presets → Vemcount
+            show_hours=(open_start, open_end)
+        )
         df_raw = normalize_resp(resp)
         if df_raw.empty:
             st.info("Geen data beschikbaar voor de gekozen periode/granulariteit."); st.stop()
@@ -443,13 +401,18 @@ if analyze:
         unsafe_allow_html=True
     )
     if proj_toggle:
-        # resterende dagen dit jaar
+        # resterende dagen dit jaar (projectie baseer je op # unieke dagen in dataset)
         today2 = date.today()
         end_year = date(today2.year, 12, 31)
         rem_days = (end_year - today2).days
-        # dag-equivalent van gekozen periode
-        # (benaderd via datumbereik; consistent met period=date)
-        days_in_period = (date_to - date_from).days + 1
+
+        try:
+            days_in_period = int(pd.to_datetime(df["date"], errors="coerce").nunique())
+            if days_in_period <= 0:
+                days_in_period = 1
+        except Exception:
+            days_in_period = 1
+
         daily_potential = g["uplift_total"].sum() / max(1, days_in_period)
         projection = daily_potential * max(0, rem_days)
         cB.markdown(
@@ -602,7 +565,7 @@ if analyze:
         # Optie: individuele secties tonen/verbergen
         show_individual = st.toggle('Toon individuele vestigingen (uurprofielen & heatmaps)', value=True)
 
-# ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
+    # ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
     if step == "hour" and show_individual:
         st.markdown("## Uur‑profielen (drill‑down & heatmap)")
         st.caption(f"Heatmap binnen openingstijd {open_start:02d}:00–{open_end:02d}:00 (gemiddeld in de gekozen periode).")
@@ -705,9 +668,8 @@ if analyze:
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
         dbg = {
+            "period_token": period_token,
             "period_step": step,
-            "from": str(date_from),
-            "to": str(date_to),
             "shop_ids": shop_ids,
             "ref_spv": ref_spv,
             "csm2i_target": csm2i_target,
