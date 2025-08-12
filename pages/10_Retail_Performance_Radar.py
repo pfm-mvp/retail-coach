@@ -178,19 +178,19 @@ with c5:
 with c6:
     csm2i_target = st.slider("CSm²I‑target", 0.10, 2.00, 1.00, 0.05)
 
+# Alleen bij ‘Uur’: openingsuren kiezen voor heatmap/drilldown
+open_start, open_end = 9, 21
+if gran.lower().startswith("u"):
+    st.markdown("**Openingstijden (voor uur‑drilldown):**")
+    open_start, open_end = st.slider(
+        "Toon uren tussen …",
+        min_value=0, max_value=23, value=(9, 21), step=1,
+        help="Wordt gebruikt voor de uur‑heatmap en drill‑down grafieken."
+    )
+
 st.markdown("### Selecteer winkels")
 selected_names = st.multiselect("Selecteer winkels", names, default=names[:5], placeholder="Kies 1 of meer winkels…")
 shop_ids = [NAME_TO_ID[n] for n in selected_names]
-
-# Openingstijden: alleen relevant voor uur‑heatmap
-if gran.lower().startswith("u"):
-    oh1, oh2, oh3 = st.columns([1,1,1])
-    with oh1:
-        open_from = st.slider("Opening uur (from)", 0, 23, 9, 1)
-    with oh2:
-        open_to = st.slider("Sluiting uur (to)", 0, 23, 21, 1)
-    with oh3:
-        hm_metric = st.selectbox("Heatmap metric", ["Bezoekers (count_in)","SPV (€)","Conversie (%)"], index=0)
 
 # Analyseer‑knop (links)
 analyze = st.button("🔍 Analyseer", type="secondary")
@@ -219,9 +219,7 @@ def normalize_resp(resp):
     df = pd.DataFrame(rows)
     if df.empty: return df
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    df["date"] = ts.dt.date
-    df["hour"] = ts.dt.hour
-    df["dow"]  = ts.dt.dayofweek  # 0=Mon
+    df["date"] = ts.dt.date; df["hour"] = ts.dt.hour
     return df
 
 # =========================
@@ -234,14 +232,30 @@ if analyze:
     if not API_URL:
         st.warning("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
 
-    step = "hour" if gran.lower().startswith("u") else "day"
+    requested_step = "hour" if gran.lower().startswith("u") else "day"
+    step = requested_step
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
 
+    # 1) Eerste fetch op gevraagde granulariteit
     with st.spinner("Data ophalen…"):
         resp = fetch_report(API_URL, shop_ids, date_from, date_to, step, outputs)
         df = normalize_resp(resp)
-        if df.empty:
-            st.info("Geen data beschikbaar voor de gekozen periode."); st.stop()
+
+    # 2) Automatisch fallback naar 'day' als uurlijkse data ontbreekt/leeg is
+    fallback_used = False
+    if step == "hour":
+        no_hour_info = (df.empty) or (df["hour"].isna().all())
+        zero_visitors = (not df.empty) and (pd.to_numeric(df.get("count_in", pd.Series()), errors="coerce").fillna(0).sum() == 0)
+        if no_hour_info or zero_visitors:
+            st.info("Geen uurlijkse data gevonden voor de gekozen periode/winkels. Automatisch teruggevallen op **Dag**.")
+            step = "day"
+            fallback_used = True
+            with st.spinner("Dagdata ophalen…"):
+                resp = fetch_report(API_URL, shop_ids, date_from, date_to, step, outputs)
+                df = normalize_resp(resp)
+
+    if df.empty:
+        st.info("Geen data beschikbaar voor de gekozen periode."); st.stop()
 
     # Referentie‑SPV (portfolio + uplift)
     mode = "portfolio"
@@ -303,7 +317,7 @@ if analyze:
         # resterende dagen dit jaar
         today2 = date.today()
         end_year = date(today2.year, 12, 31)
-        rem_days = (end_year - today2).days
+        rem_days = max(0, (end_year - today2).days)
         # dag-equivalent van gekozen periode
         if period_label == "last_month":
             days_in_period = (date_to - date_from).days + 1
@@ -312,7 +326,7 @@ if analyze:
         else:
             days_in_period = 7
         daily_potential = agg["uplift_total"].sum() / max(1, days_in_period)
-        projection = daily_potential * max(0, rem_days)
+        projection = daily_potential * rem_days
         cB.markdown(
             f"""
             <div class="big-card">
@@ -378,14 +392,14 @@ if analyze:
         xaxis=dict(title="Sales per Visitor (€/bezoeker)", tickformat=",.2f"),
         yaxis=dict(title="Sales per m² (€/m²)", tickformat=",.2f"),
     )
-    st.plotly_chart(scatter, use_container_width=True, key="scatter_main")
+    st.plotly_chart(scatter, use_container_width=True, key="scatter_overview")
 
     # ===== Aanbevelingen per winkel =====
     st.markdown("## Aanbevelingen per winkel")
     # benchmark SPV (best performer) t.b.v. vergelijk
     best_spv = agg.loc[agg["spv"].idxmax(), "spv"] if not agg.empty else 0.0
 
-    for _, row in agg.sort_values("uplift_total", ascending=False).iterrows():
+    for idx, row in agg.sort_values("uplift_total", ascending=False).iterrows():
         name = row["shop_name"]; sid = int(row["shop_id"])
         csi = float(row["csm2i"]); spv_store = float(row["spv"]); spsqm_store = float(row["spsqm"])
         conv_store = float(row["conv"])
@@ -414,86 +428,109 @@ if analyze:
             """.strip()
         )
 
-        # ========== Uur‑profielen (alleen wanneer 'Uur' is gekozen) ==========
-        if step == "hour":
-            st.markdown("**Uur‑profielen (drill‑down & heatmap)**")
-            st.caption(f"Heatmap binnen openingstijd {open_from:02d}:00–{open_to:02d}:00 (gemiddeld in de gekozen periode).")
-
+        # ===== Uur‑drilldown (alleen als 'Uur' is gevraagd én NIET gefall‑backt)
+        if requested_step == "hour" and not fallback_used:
             sub = df[df["shop_id"] == sid].copy()
-            if sub.empty:
-                st.info("Geen uurdata voor deze winkel in de periode."); 
-                st.markdown("---")
-                continue
+            if not sub.empty and "hour" in sub.columns:
+                sub = normalize_kpis(sub)
+                # Gemiddelden per uur over de hele periode
+                prof = (
+                    sub.groupby("hour")
+                    .agg(
+                        visitors=("count_in", "mean"),
+                        spv=("sales_per_visitor", "mean"),
+                        conv=("conversion_rate", "mean")
+                    )
+                    .reset_index()
+                )
+                # filter op openingstijd
+                prof = prof[(prof["hour"] >= open_start) & (prof["hour"] <= open_end)]
+                st.caption(f"Uur‑profielen (drill‑down & heatmap)  \n"
+                           f"_Heatmap binnen openingstijd {open_start:02d}:00–{open_end:02d}:00 (gemiddeld in de gekozen periode)._")
 
-            sub = normalize_kpis(sub)
-            # filter op openingstijd
-            start_h = int(open_from)
-            end_h = int(open_to)
-            if start_h <= end_h:
-                mask = (sub["hour"] >= start_h) & (sub["hour"] <= end_h)
+                if prof.empty:
+                    st.info("Binnen de opgegeven openingstijd is geen uurdata.")
+                else:
+                    # Heatmap: x = uur, y = één rij “Gemiddeld”, kleur = gekozen metric
+                    metric = st.selectbox(
+                        "Kies metric voor heatmap",
+                        options=["visitors","spv","conv"],
+                        format_func=lambda m: {"visitors":"Bezoekers","spv":"SPV (€)","conv":"Conversie (%)"}[m],
+                        key=f"metric_{sid}"
+                    )
+                    hm = prof[["hour", metric]].copy()
+                    hm["row"] = "Gemiddeld (alle dagen)"
+                    # schaal conversie naar %
+                    zvals = hm[metric].values * (100.0 if metric == "conv" else 1.0)
+
+                    fig_hm = go.Figure(
+                        data=go.Heatmap(
+                            x=hm["hour"], y=hm["row"],
+                            z=zvals,
+                            colorscale="Viridis",
+                            colorbar=dict(title=dict(
+                                text="%",
+                            ) if metric=="conv" else dict(text="waarde")),
+                            showscale=True,
+                            hovertemplate="Uur: %{x}:00<br>Waarde: %{z:.2f}<extra></extra>"
+                        )
+                    )
+                    fig_hm.update_layout(
+                        height=200, margin=dict(l=20,r=20,t=10,b=10),
+                        xaxis=dict(title="Uur", tickmode="linear"),
+                        yaxis=dict(title="")
+                    )
+                    st.plotly_chart(fig_hm, use_container_width=True, key=f"hm_{sid}")
+
+                    # Lijnchart SPV & Conversie + bezoekers (rechter as)
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(
+                        x=prof["hour"], y=prof["visitors"], name="Bezoekers",
+                        yaxis="y2", opacity=0.35, marker_color="#9E77ED"
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=prof["hour"], y=prof["spv"], name="SPV (€)",
+                        mode="lines+markers"
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=prof["hour"], y=prof["conv"]*100, name="Conversie (%)",
+                        mode="lines+markers"
+                    ))
+                    fig.update_layout(
+                        height=360, margin=dict(l=20,r=20,t=10,b=10),
+                        xaxis=dict(title="Uur"),
+                        yaxis=dict(title="SPV (€) / Conversie (%)", rangemode="tozero"),
+                        yaxis2=dict(title="Bezoekers", overlaying="y", side="right", rangemode="tozero"),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key=f"lines_{sid}")
             else:
-                # nachtelijke winkels (bv 22–06): twee stukken
-                mask = (sub["hour"] >= start_h) | (sub["hour"] <= end_h)
-            sub = sub[mask].copy()
-            if sub.empty:
-                st.info("Binnen de opgegeven openingstijd is geen uurdata."); 
-                st.markdown("---")
-                continue
+                st.info("Geen uurlijkse rijen voor deze winkel in de gekozen periode.")
 
-            # dag-van-week labels
-            dow_names = {0:"Ma",1:"Di",2:"Wo",3:"Do",4:"Vr",5:"Za",6:"Zo"}
-            sub["dow_name"] = sub["dow"].map(dow_names)
-
-            # heatmap metric
-            if hm_metric.startswith("Bezoekers"):
-                metric_col = "count_in"
-                z_title = "Bezoekers (gemiddeld)"
-            elif hm_metric.startswith("SPV"):
-                metric_col = "sales_per_visitor"
-                z_title = "SPV (€)"
-            else:
-                metric_col = "conversion_rate"
-                sub[metric_col] = sub[metric_col] * 100.0
-                z_title = "Conversie (%)"
-
-            # per dag x uur gemiddelde
-            pivot = (
-                sub.groupby(["dow_name","hour"], as_index=False)
-                   .agg(val=(metric_col,"mean"))
-            )
-            # volledige raster binnen uren-venster
-            hours = list(range(start_h, end_h + 1)) if start_h <= end_h else list(range(start_h,24)) + list(range(0,end_h+1))
-            idx = pd.MultiIndex.from_product([list(dow_names.values()), hours], names=["dow_name","hour"])
-            pivot = pivot.set_index(["dow_name","hour"]).reindex(idx).reset_index()
-
-            hm = pivot.pivot(index="dow_name", columns="hour", values="val")
-            # plotly heatmap
-            fig_hm = go.Figure(data=go.Heatmap(
-                z=hm.values,
-                x=hm.columns,
-                y=hm.index,
-                colorscale="Viridis",
-                colorbar=dict(title=z_title),
-                hovertemplate="Dag: %{y}<br>Uur: %{x}:00<br>Waarde: %{z:.2f}<extra></extra>"
-            ))
-            fig_hm.update_layout(
-                height=260, margin=dict(l=20,r=20,t=10,b=10),
-                xaxis=dict(title="Uur"),
-                yaxis=dict(title="Gemiddeld (alle dagen)")
-            )
-            st.plotly_chart(fig_hm, use_container_width=True, key=f"hm_{sid}")
-
+        # Suggesties
+        bullets = []
+        if csi < csm2i_target:
+            bullets.append("CSm²I onder target → plan **upsell/cross‑sell** & coach op verkooproutine (SPV).")
+        if conv_store < conv_target:
+            bullets.append("Conversie onder doel → **extra bezetting** op piekuren & **actie bij instap**.")
+        if not bullets:
+            bullets.append("Presteert op of boven target → **vasthouden** en best practices delen.")
+        for b in bullets:
+            st.write(f"- {b}")
         st.markdown("---")
 
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
         dbg = {
-            "period_step": step,
+            "requested_step": requested_step,
+            "used_step": step,
+            "fallback_used": fallback_used,
             "from": str(date_from),
             "to": str(date_to),
             "shop_ids": shop_ids,
             "ref_spv": ref_spv,
             "csm2i_target": csm2i_target,
             "conv_goal_pct": conv_goal_pct,
+            "open_hours": (open_start, open_end),
         }
         st.json(dbg)
