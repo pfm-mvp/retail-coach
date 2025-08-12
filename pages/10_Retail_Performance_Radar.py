@@ -428,82 +428,123 @@ if analyze:
             """.strip()
         )
 
-        # ===== Uur‑drilldown (alleen als 'Uur' is gevraagd én NIET gefall‑backt)
-        if requested_step == "hour" and not fallback_used:
-            sub = df[df["shop_id"] == sid].copy()
-            if not sub.empty and "hour" in sub.columns:
-                sub = normalize_kpis(sub)
-                # Gemiddelden per uur over de hele periode
-                prof = (
-                    sub.groupby("hour")
-                    .agg(
-                        visitors=("count_in", "mean"),
-                        spv=("sales_per_visitor", "mean"),
-                        conv=("conversion_rate", "mean")
-                    )
-                    .reset_index()
-                )
-                # filter op openingstijd
-                prof = prof[(prof["hour"] >= open_start) & (prof["hour"] <= open_end)]
-                st.caption(f"Uur‑profielen (drill‑down & heatmap)  \n"
-                           f"_Heatmap binnen openingstijd {open_start:02d}:00–{open_end:02d}:00 (gemiddeld in de gekozen periode)._")
+# ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
+if step == "hour":
+    st.markdown("## Uur‑profielen (drill‑down & heatmap)")
 
-                if prof.empty:
-                    st.info("Binnen de opgegeven openingstijd is geen uurdata.")
-                else:
-                    # Heatmap: x = uur, y = één rij “Gemiddeld”, kleur = gekozen metric
-                    metric = st.selectbox(
-                        "Kies metric voor heatmap",
-                        options=["visitors","spv","conv"],
-                        format_func=lambda m: {"visitors":"Bezoekers","spv":"SPV (€)","conv":"Conversie (%)"}[m],
-                        key=f"metric_{sid}"
-                    )
-                    hm = prof[["hour", metric]].copy()
-                    hm["row"] = "Gemiddeld (alle dagen)"
-                    # schaal conversie naar %
-                    zvals = hm[metric].values * (100.0 if metric == "conv" else 1.0)
+    # Controls for opening window + metric (keeps earlier defaults if you already have them)
+    c_open1, c_open2, c_metric = st.columns([1,1,2])
+    with c_open1:
+        open_start = st.slider("Opening vanaf (uur)", 0, 23, 9, key="open_start")
+    with c_open2:
+        open_end = st.slider("Tot (uur)", 1, 24, 21, key="open_end")
+    with c_metric:
+        metric_choice = st.selectbox(
+            "Heatmap metric",
+            ["Bezoekers", "SPV (€)", "Conversie (%)"],
+            index=0,
+            key="heat_metric",
+            help="Bezoekers = sum(count_in); SPV = omzet/bezoeker; Conversie = % kopers."
+        )
 
-                    fig_hm = go.Figure(
-                        data=go.Heatmap(
-                            x=hm["hour"], y=hm["row"],
-                            z=zvals,
-                            colorscale="Viridis",
-                            colorbar=dict(title=dict(
-                                text="%",
-                            ) if metric=="conv" else dict(text="waarde")),
-                            showscale=True,
-                            hovertemplate="Uur: %{x}:00<br>Waarde: %{z:.2f}<extra></extra>"
-                        )
-                    )
-                    fig_hm.update_layout(
-                        height=200, margin=dict(l=20,r=20,t=10,b=10),
-                        xaxis=dict(title="Uur", tickmode="linear"),
-                        yaxis=dict(title="")
-                    )
-                    st.plotly_chart(fig_hm, use_container_width=True, key=f"hm_{sid}")
+    def label_for_metric(m):
+        return {"Bezoekers": "Bezoekers",
+                "SPV (€)": "SPV (€ per bezoeker)",
+                "Conversie (%)": "Conversie (%)"}[m]
 
-                    # Lijnchart SPV & Conversie + bezoekers (rechter as)
-                    fig = go.Figure()
-                    fig.add_trace(go.Bar(
-                        x=prof["hour"], y=prof["visitors"], name="Bezoekers",
-                        yaxis="y2", opacity=0.35, marker_color="#9E77ED"
-                    ))
-                    fig.add_trace(go.Scatter(
-                        x=prof["hour"], y=prof["spv"], name="SPV (€)",
-                        mode="lines+markers"
-                    ))
-                    fig.add_trace(go.Scatter(
-                        x=prof["hour"], y=prof["conv"]*100, name="Conversie (%)",
-                        mode="lines+markers"
-                    ))
-                    fig.update_layout(
-                        height=360, margin=dict(l=20,r=20,t=10,b=10),
-                        xaxis=dict(title="Uur"),
-                        yaxis=dict(title="SPV (€) / Conversie (%)", rangemode="tozero"),
-                        yaxis2=dict(title="Bezoekers", overlaying="y", side="right", rangemode="tozero"),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-                    )
-                    st.plotly_chart(fig, use_container_width=True, key=f"lines_{sid}")
+    # Build hour x weekday aggregates once per shop id
+    # Use the raw df (already normalized earlier) so hour is present.
+    dow_labels = ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"]
+
+    for i, (sid, name) in enumerate([(int(r["shop_id"]), r["shop_name"]) for _, r in agg.iterrows()]):
+        sub = df[df["shop_id"] == sid].copy()
+        with st.expander(f"⏱️ {name} — uurprofiel", expanded=False):
+            if sub.empty:
+                st.info("Geen uurdata beschikbaar in de gekozen periode.")
+                continue
+
+            # prepare numerics + deriveds
+            sub = normalize_kpis(sub)
+            # weekday 0=Mon..6=Sun
+            sub["dow"] = pd.to_datetime(sub["date"]).dt.weekday
+            # safe hour int
+            sub["hour"] = pd.to_numeric(sub["hour"], errors="coerce").fillna(-1).astype(int)
+
+            grp = sub.groupby(["dow", "hour"], as_index=False).agg(
+                bezoekers=("count_in", "sum"),
+                omzet=("turnover", "sum"),
+                transacties=("transactions", "sum"),
+                conv=("conversion_rate", "mean"),  # already a fraction 0..1
+            )
+            grp["spv"] = grp["omzet"] / (grp["bezoekers"] + EPS)
+
+            # pick metric series
+            if metric_choice == "Bezoekers":
+                grp["value"] = grp["bezoekers"]
+                zfmt = ",.0f"
+                colorscale = "Viridis"
+            elif metric_choice == "SPV (€)":
+                grp["value"] = grp["spv"]
+                zfmt = ",.2f"
+                colorscale = "Viridis"
+            else:  # Conversie (%)
+                grp["value"] = grp["conv"] * 100.0
+                zfmt = ",.1f"
+                colorscale = "Viridis"
+
+            # filter to opening window; fallback to all hours if empty
+            filt = grp[(grp["hour"] >= open_start) & (grp["hour"] < open_end)]
+            used = filt if not filt.empty else grp
+
+            if filt.empty:
+                st.caption("ℹ️ Geen metingen binnen opgegeven openingstijd — toon alle uren voor context.")
+
+            # complete grid (fill missing cells with 0) so heatmap rects are consistent
+            all_hours = pd.Index(range(0, 24), name="hour")
+            all_dow = pd.Index(range(0, 7), name="dow")
+            grid = (used.set_index(["dow", "hour"])["value"]
+                         .reindex(pd.MultiIndex.from_product([all_dow, all_hours], names=["dow", "hour"]),
+                                  fill_value=0.0)
+                         .rename("value")
+                         .reset_index())
+
+            # pivot to dow x hour
+            pivot = grid.pivot(index="dow", columns="hour", values="value").sort_index()
+            pivot.index = [dow_labels[d] for d in pivot.index]  # 0..6 -> Ma..Zo
+
+            # nice ticks and format
+            heat_title = f"{label_for_metric(metric_choice)}"
+            fig_hm = px.imshow(
+                pivot.values,
+                origin="lower",
+                color_continuous_scale=colorscale,
+                aspect="auto",
+                labels=dict(color=heat_title),
+            )
+            fig_hm.update_xaxes(
+                title_text="Uur",
+                tickmode="array",
+                tickvals=list(range(0, 24)),
+                ticktext=[str(h) for h in range(0, 24)],
+            )
+            fig_hm.update_yaxes(
+                title_text="Gemiddeld (alle dagen)",
+                tickmode="array",
+                tickvals=list(range(0, 7)),
+                ticktext=pivot.index.tolist(),
+            )
+            # colorbar formatting
+            fig_hm.update_layout(
+                height=380,
+                margin=dict(l=20, r=20, t=10, b=10),
+                coloraxis_colorbar=dict(
+                    title=heat_title,
+                    tickformat=zfmt,
+                ),
+            )
+
+            st.plotly_chart(fig_hm, use_container_width=True, key=f"hm_{sid}_{i}")
+
             else:
                 st.info("Geen uurlijkse rijen voor deze winkel in de gekozen periode.")
 
