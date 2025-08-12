@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -29,17 +29,18 @@ button[data-testid="stBaseButton-secondary"]:hover { background-color: #d13c30 !
 
 /* Oranje ‘PFM’ highlight cards */
 .big-card { border:1px solid #FEAC76; background: #FFF7F2; border-radius: 12px; padding: 18px 20px;}
-.big-card .title { font-weight: 700; font-size: 1.25rem; }
-.big-card .value { font-weight: 800; font-size: 1.4rem; margin-top: .25rem; }
+.big-card .title { font-weight: 700; font-size: 1.1rem; }
+.big-card .value { font-weight: 800; font-size: 1.35rem; margin-top: .25rem; }
 
 /* Badges voor aanbevelingen */
-.badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:.8rem; font-weight:600; margin-left:6px;}
+.badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:.85rem; font-weight:600; margin-left:6px;}
 .badge-green  { background:#E9F9EE; color:#14804A; }
 .badge-amber  { background:#FEF3C7; color:#92400E; }
 .badge-red    { background:#FEE2E2; color:#991B1B; }
 
-/* kleine spacing helper */
+/* spacing helpers */
 .mt-8 { margin-top: 8px; }
+.mt-12 { margin-top: 12px; }
 .mt-16 { margin-top: 16px; }
 </style>
 """,
@@ -47,7 +48,7 @@ button[data-testid="stBaseButton-secondary"]:hover { background-color: #d13c30 !
 )
 
 st.title("Retail Performance Radar")
-st.caption("Next Best Action • Best Practice Finder • (optioneel) Demografiepatronen")
+st.caption("Next Best Action • Best Practice Finder • (optioneel) uurprofielen & heatmap")
 
 # =========================
 # Helpers
@@ -159,7 +160,7 @@ with c2:
 with c3:
     proj_toggle = st.toggle("Toon projectie voor resterend jaar", value=False)
 
-# datums
+# datumrange
 today = date.today()
 if period_label == "last_month":
     first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
@@ -170,6 +171,7 @@ elif period_label == "30 dagen":
 else:
     date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
 
+# targets
 c4, c5, c6 = st.columns([1,1,1])
 with c4:
     conv_goal_pct = st.slider("Conversiedoel (%)", 1, 80, 20, 1)
@@ -178,21 +180,31 @@ with c5:
 with c6:
     csm2i_target = st.slider("CSm²I‑target", 0.10, 2.00, 1.00, 0.05)
 
-# Alleen bij ‘Uur’: openingsuren kiezen voor heatmap/drilldown
-open_start, open_end = 9, 21
-if gran.lower().startswith("u"):
-    st.markdown("**Openingstijden (voor uur‑drilldown):**")
-    open_start, open_end = st.slider(
-        "Toon uren tussen …",
-        min_value=0, max_value=23, value=(9, 21), step=1,
-        help="Wordt gebruikt voor de uur‑heatmap en drill‑down grafieken."
-    )
-
+# winkels
 st.markdown("### Selecteer winkels")
 selected_names = st.multiselect("Selecteer winkels", names, default=names[:5], placeholder="Kies 1 of meer winkels…")
 shop_ids = [NAME_TO_ID[n] for n in selected_names]
 
-# Analyseer‑knop (links)
+# bij UUR: openingstijd + metric voor heatmap
+open_start, open_end = 9, 21
+metric_for_heatmap = "Bezoekers"
+if gran.lower().startswith("u"):
+    c_oh1, c_oh2 = st.columns([2,1])
+    with c_oh1:
+        open_start, open_end = st.slider(
+            "Openingstijd (heatmap filter)",
+            0, 23, (9, 21),
+            help="Uren buiten dit bereik worden verborgen in de heatmap"
+        )
+    with c_oh2:
+        metric_for_heatmap = st.selectbox(
+            "Heatmap‑metric",
+            ["Bezoekers", "SPV (€)", "Conversie (%)"],
+            index=0,
+            help="Kies de intensiteit voor de heatmap"
+        )
+
+# Analyseer‑knop
 analyze = st.button("🔍 Analyseer", type="secondary")
 
 # =========================
@@ -219,7 +231,9 @@ def normalize_resp(resp):
     df = pd.DataFrame(rows)
     if df.empty: return df
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    df["date"] = ts.dt.date; df["hour"] = ts.dt.hour
+    df["date"] = ts.dt.date
+    df["hour"] = ts.dt.hour
+    df["dow"]  = ts.dt.dayofweek  # 0=ma, 6=zo
     return df
 
 # =========================
@@ -232,35 +246,17 @@ if analyze:
     if not API_URL:
         st.warning("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
 
-    requested_step = "hour" if gran.lower().startswith("u") else "day"
-    step = requested_step
+    step = "hour" if gran.lower().startswith("u") else "day"
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
 
-    # 1) Eerste fetch op gevraagde granulariteit
     with st.spinner("Data ophalen…"):
         resp = fetch_report(API_URL, shop_ids, date_from, date_to, step, outputs)
         df = normalize_resp(resp)
-
-    # 2) Automatisch fallback naar 'day' als uurlijkse data ontbreekt/leeg is
-    fallback_used = False
-    if step == "hour":
-        no_hour_info = (df.empty) or (df["hour"].isna().all())
-        zero_visitors = (not df.empty) and (pd.to_numeric(df.get("count_in", pd.Series()), errors="coerce").fillna(0).sum() == 0)
-        if no_hour_info or zero_visitors:
-            st.info("Geen uurlijkse data gevonden voor de gekozen periode/winkels. Automatisch teruggevallen op **Dag**.")
-            step = "day"
-            fallback_used = True
-            with st.spinner("Dagdata ophalen…"):
-                resp = fetch_report(API_URL, shop_ids, date_from, date_to, step, outputs)
-                df = normalize_resp(resp)
-
-    if df.empty:
-        st.info("Geen data beschikbaar voor de gekozen periode."); st.stop()
+        if df.empty:
+            st.info("Geen data beschikbaar voor de gekozen periode."); st.stop()
 
     # Referentie‑SPV (portfolio + uplift)
-    mode = "portfolio"
-    bm_id = None
-    ref_spv = choose_ref_spv(df, mode=mode, benchmark_shop_id=bm_id, uplift_pct=spv_uplift_pct/100.0)
+    ref_spv = choose_ref_spv(df, mode="portfolio", uplift_pct=spv_uplift_pct/100.0)
 
     # Uniforme CSm²I + uplift (CSm²I‑component)
     df = compute_csm2i_and_uplift(df, ref_spv=ref_spv, csm2i_target=csm2i_target)
@@ -317,7 +313,7 @@ if analyze:
         # resterende dagen dit jaar
         today2 = date.today()
         end_year = date(today2.year, 12, 31)
-        rem_days = max(0, (end_year - today2).days)
+        rem_days = (end_year - today2).days
         # dag-equivalent van gekozen periode
         if period_label == "last_month":
             days_in_period = (date_to - date_from).days + 1
@@ -326,7 +322,7 @@ if analyze:
         else:
             days_in_period = 7
         daily_potential = agg["uplift_total"].sum() / max(1, days_in_period)
-        projection = daily_potential * rem_days
+        projection = daily_potential * max(0, rem_days)
         cB.markdown(
             f"""
             <div class="big-card">
@@ -358,7 +354,6 @@ if analyze:
         ["Onder target", "Boven target"],
         default="Rond target",
     )
-    # maat: total uplift
     rad["size_metric"] = rad["uplift_total"].fillna(0.0)
     rad["hover_spv"]   = rad["spv"].round(2).apply(fmt_eur2)
     rad["hover_spsqm"] = rad["spsqm"].round(2).apply(fmt_eur2)
@@ -392,21 +387,19 @@ if analyze:
         xaxis=dict(title="Sales per Visitor (€/bezoeker)", tickformat=",.2f"),
         yaxis=dict(title="Sales per m² (€/m²)", tickformat=",.2f"),
     )
-    st.plotly_chart(scatter, use_container_width=True, key="scatter_overview")
+    st.plotly_chart(scatter, use_container_width=True)
 
     # ===== Aanbevelingen per winkel =====
     st.markdown("## Aanbevelingen per winkel")
-    # benchmark SPV (best performer) t.b.v. vergelijk
-    best_spv = agg.loc[agg["spv"].idxmax(), "spv"] if not agg.empty else 0.0
+    best_spv = agg["spv"].max() if not agg.empty else 0.0
 
-    for idx, row in agg.sort_values("uplift_total", ascending=False).iterrows():
+    for _, row in agg.sort_values("uplift_total", ascending=False).iterrows():
         name = row["shop_name"]; sid = int(row["shop_id"])
         csi = float(row["csm2i"]); spv_store = float(row["spv"]); spsqm_store = float(row["spsqm"])
         conv_store = float(row["conv"])
         up_csm = float(row["uplift_csm"]); up_conv = float(row["uplift_conv"])
         total_up = float(row["uplift_total"])
 
-        # kleurindicatie
         if csi < low_thr:
             badge = '<span class="badge badge-red">🔴 onder target</span>'
         elif csi > high_thr:
@@ -414,163 +407,124 @@ if analyze:
         else:
             badge = '<span class="badge badge-amber">🟠 rond target</span>'
 
-        # vergelijk t.o.v. beste SPV
         spv_comp = f"{fmt_eur2(spv_store)} vs best {fmt_eur2(best_spv)}" if best_spv > 0 else fmt_eur2(spv_store)
 
         st.markdown(f"### {name} {badge}", unsafe_allow_html=True)
         st.markdown(
             f"""
-            **CSm²I huidig vs target:** {csi:.2f} / {csm2i_target:.2f}  
-            **Conversie huidig vs doel:** {conv_store*100:.1f}% / {conv_goal_pct:.0f}%  
-            **Sales per m² (actueel):** {fmt_eur2(spsqm_store)}  
-            **Sales per Visitor:** {spv_comp}  
-            **Potentiële uplift:** {fmt_eur(total_up)} *(CSm²I: {fmt_eur(up_csm)} • Conversie: {fmt_eur(up_conv)})*
-            """.strip()
+**CSm²I huidig vs target:** {csi:.2f} / {csm2i_target:.2f}  
+**Conversie huidig vs doel:** {conv_store*100:.1f}% / {conv_goal_pct:.0f}%  
+**Sales per m² (actueel):** {fmt_eur2(spsqm_store)}  
+**Sales per Visitor:** {spv_comp}  
+**Potentiële uplift:** {fmt_eur(total_up)} *(CSm²I: {fmt_eur(up_csm)} • Conversie: {fmt_eur(up_conv)})*
+"""
         )
 
-# ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
-if step == "hour":
-    st.markdown("## Uur‑profielen (drill‑down & heatmap)")
-
-    # Controls for opening window + metric (keeps earlier defaults if you already have them)
-    c_open1, c_open2, c_metric = st.columns([1,1,2])
-    with c_open1:
-        open_start = st.slider("Opening vanaf (uur)", 0, 23, 9, key="open_start")
-    with c_open2:
-        open_end = st.slider("Tot (uur)", 1, 24, 21, key="open_end")
-    with c_metric:
-        metric_choice = st.selectbox(
-            "Heatmap metric",
-            ["Bezoekers", "SPV (€)", "Conversie (%)"],
-            index=0,
-            key="heat_metric",
-            help="Bezoekers = sum(count_in); SPV = omzet/bezoeker; Conversie = % kopers."
-        )
-
-    def label_for_metric(m):
-        return {"Bezoekers": "Bezoekers",
-                "SPV (€)": "SPV (€ per bezoeker)",
-                "Conversie (%)": "Conversie (%)"}[m]
-
-    # Build hour x weekday aggregates once per shop id
-    # Use the raw df (already normalized earlier) so hour is present.
-    dow_labels = ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"]
-
-    for i, (sid, name) in enumerate([(int(r["shop_id"]), r["shop_name"]) for _, r in agg.iterrows()]):
-        sub = df[df["shop_id"] == sid].copy()
-        with st.expander(f"⏱️ {name} — uurprofiel", expanded=False):
-            if sub.empty:
-                st.info("Geen uurdata beschikbaar in de gekozen periode.")
-                continue
-
-            # prepare numerics + deriveds
-            sub = normalize_kpis(sub)
-            # weekday 0=Mon..6=Sun
-            sub["dow"] = pd.to_datetime(sub["date"]).dt.weekday
-            # safe hour int
-            sub["hour"] = pd.to_numeric(sub["hour"], errors="coerce").fillna(-1).astype(int)
-
-            grp = sub.groupby(["dow", "hour"], as_index=False).agg(
-                bezoekers=("count_in", "sum"),
-                omzet=("turnover", "sum"),
-                transacties=("transactions", "sum"),
-                conv=("conversion_rate", "mean"),  # already a fraction 0..1
-            )
-            grp["spv"] = grp["omzet"] / (grp["bezoekers"] + EPS)
-
-            # pick metric series
-            if metric_choice == "Bezoekers":
-                grp["value"] = grp["bezoekers"]
-                zfmt = ",.0f"
-                colorscale = "Viridis"
-            elif metric_choice == "SPV (€)":
-                grp["value"] = grp["spv"]
-                zfmt = ",.2f"
-                colorscale = "Viridis"
-            else:  # Conversie (%)
-                grp["value"] = grp["conv"] * 100.0
-                zfmt = ",.1f"
-                colorscale = "Viridis"
-
-            # filter to opening window; fallback to all hours if empty
-            filt = grp[(grp["hour"] >= open_start) & (grp["hour"] < open_end)]
-            used = filt if not filt.empty else grp
-
-            if filt.empty:
-                st.caption("ℹ️ Geen metingen binnen opgegeven openingstijd — toon alle uren voor context.")
-
-            # complete grid (fill missing cells with 0) so heatmap rects are consistent
-            all_hours = pd.Index(range(0, 24), name="hour")
-            all_dow = pd.Index(range(0, 7), name="dow")
-            grid = (used.set_index(["dow", "hour"])["value"]
-                         .reindex(pd.MultiIndex.from_product([all_dow, all_hours], names=["dow", "hour"]),
-                                  fill_value=0.0)
-                         .rename("value")
-                         .reset_index())
-
-            # pivot to dow x hour
-            pivot = grid.pivot(index="dow", columns="hour", values="value").sort_index()
-            pivot.index = [dow_labels[d] for d in pivot.index]  # 0..6 -> Ma..Zo
-
-            # nice ticks and format
-            heat_title = f"{label_for_metric(metric_choice)}"
-            fig_hm = px.imshow(
-                pivot.values,
-                origin="lower",
-                color_continuous_scale=colorscale,
-                aspect="auto",
-                labels=dict(color=heat_title),
-            )
-            fig_hm.update_xaxes(
-                title_text="Uur",
-                tickmode="array",
-                tickvals=list(range(0, 24)),
-                ticktext=[str(h) for h in range(0, 24)],
-            )
-            fig_hm.update_yaxes(
-                title_text="Gemiddeld (alle dagen)",
-                tickmode="array",
-                tickvals=list(range(0, 7)),
-                ticktext=pivot.index.tolist(),
-            )
-            # colorbar formatting
-            fig_hm.update_layout(
-                height=380,
-                margin=dict(l=20, r=20, t=10, b=10),
-                coloraxis_colorbar=dict(
-                    title=heat_title,
-                    tickformat=zfmt,
-                ),
-            )
-
-            st.plotly_chart(fig_hm, use_container_width=True, key=f"hm_{sid}_{i}")
-        else:
-            st.info("Geen uurlijkse rijen voor deze winkel in de gekozen periode.")
-
-        # Suggesties
         bullets = []
         if csi < csm2i_target:
             bullets.append("CSm²I onder target → plan **upsell/cross‑sell** & coach op verkooproutine (SPV).")
         if conv_store < conv_target:
             bullets.append("Conversie onder doel → **extra bezetting** op piekuren & **actie bij instap**.")
+        if (best_spv - spv_store) > 0.1:
+            bullets.append(f"SPV {fmt_eur2(spv_store)} < best {fmt_eur2(best_spv)} → leer van **best practice** winkel.")
         if not bullets:
             bullets.append("Presteert op of boven target → **vasthouden** en best practices delen.")
+
         for b in bullets:
             st.write(f"- {b}")
+
+        # ===== UUR‑drill‑down & heatmap (alleen als gran = Uur) =====
+        if step == "hour":
+            st.markdown("#### Uur‑profielen (drill‑down & heatmap)")
+            st.caption(f"Heatmap binnen openingstijd {open_start:02d}:00–{open_end:02d}:00 (gemiddeld in de gekozen periode).")
+
+            sub = df[df["shop_id"] == sid].copy()
+            if not sub.empty and "hour" in sub.columns:
+                sub = normalize_kpis(sub)
+
+                # Filter op openingstijd
+                sub = sub[(sub["hour"] >= open_start) & (sub["hour"] <= open_end)]
+
+                if not sub.empty:
+                    # 1) kleine drill‑down lijn/bargrafiek per uur (gemiddeld over dagen)
+                    prof = sub.groupby("hour").agg(
+                        visitors=("count_in","sum"),
+                        spv=("sales_per_visitor","mean"),
+                        conv=("conversion_rate","mean")
+                    ).reset_index()
+
+                    # expander met unieke key om duplicate‑id te voorkomen
+                    with st.expander(f"⏱️ {name} — uurprofiel", expanded=False):
+                        fig = go.Figure()
+                        fig.add_trace(go.Bar(x=prof["hour"], y=prof["visitors"], name="Bezoekers", yaxis="y2", opacity=0.3))
+                        fig.add_trace(go.Scatter(x=prof["hour"], y=prof["spv"], name="SPV (€)", mode="lines+markers"))
+                        fig.add_trace(go.Scatter(x=prof["hour"], y=prof["conv"]*100, name="Conversie (%)", mode="lines+markers"))
+                        fig.update_layout(
+                            height=340, margin=dict(l=20,r=20,t=10,b=10),
+                            xaxis=dict(title="Uur", dtick=1),
+                            yaxis=dict(title="SPV (€) / Conversie (%)", rangemode="tozero"),
+                            yaxis2=dict(title="Bezoekers", overlaying="y", side="right", rangemode="tozero"),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    # 2) Heatmap: dag‑van‑week (rij) × uur (kolom)
+                    # Kies metric
+                    if metric_for_heatmap == "Bezoekers":
+                        sub["metric_val"] = sub["count_in"]
+                        ztitle = "Bezoekers"
+                        ztick = ",.0f"
+                    elif metric_for_heatmap == "SPV (€)":
+                        sub["metric_val"] = sub["sales_per_visitor"]
+                        ztitle = "SPV (€)"
+                        ztick = ",.2f"
+                    else:  # Conversie (%)
+                        sub["metric_val"] = sub["conversion_rate"]*100.0
+                        ztitle = "Conversie (%)"
+                        ztick = ",.1f"
+
+                    # Gemiddelde per dag‑van‑week × uur
+                    hm = sub.groupby(["dow","hour"], as_index=False)["metric_val"].mean()
+                    # volledige rooster binnen openingstijd
+                    hours = list(range(open_start, open_end+1))
+                    dows  = list(range(0,7))
+                    grid = pd.MultiIndex.from_product([dows, hours], names=["dow","hour"]).to_frame(index=False)
+                    hm = grid.merge(hm, how="left", on=["dow","hour"]).fillna(0.0)
+
+                    pivot = hm.pivot(index="dow", columns="hour", values="metric_val").sort_index()
+                    pivot.index = ["Ma","Di","Wo","Do","Vr","Za","Zo"]
+
+                    fig_hm = px.imshow(
+                        pivot.values,
+                        color_continuous_scale="Viridis",
+                        aspect="auto",
+                        labels=dict(color=ztitle),
+                    )
+                    fig_hm.update_layout(
+                        height=260, margin=dict(l=20,r=20,t=10,b=10),
+                        coloraxis_colorbar=dict(title=ztitle, tickformat=ztick),
+                        xaxis=dict(title="Uur", tickmode="array", tickvals=list(range(len(hours))), ticktext=[f"{h:02d}" for h in hours]),
+                        yaxis=dict(title="Dag", tickmode="array", tickvals=list(range(7)), ticktext=list(pivot.index))
+                    )
+                    st.plotly_chart(fig_hm, use_container_width=True)
+                else:
+                    st.info("Binnen de opgegeven openingstijd is geen uurdata.")
+            else:
+                st.info("Geen uurdata beschikbaar voor deze winkel in de gekozen periode.")
+
         st.markdown("---")
 
     # ===== Debug (optioneel inklapbaar)
     with st.expander("🛠️ Debug"):
         dbg = {
-            "requested_step": requested_step,
-            "used_step": step,
-            "fallback_used": fallback_used,
+            "period_step": step,
             "from": str(date_from),
             "to": str(date_to),
             "shop_ids": shop_ids,
             "ref_spv": ref_spv,
             "csm2i_target": csm2i_target,
             "conv_goal_pct": conv_goal_pct,
-            "open_hours": (open_start, open_end),
+            "open_hours": (open_start, open_end) if step == "hour" else None,
+            "heatmap_metric": metric_for_heatmap if step == "hour" else None,
         }
         st.json(dbg)
