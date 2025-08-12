@@ -6,6 +6,7 @@ from datetime import date, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from urllib.parse import urlencode
+import sys, pathlib  # <— nodig voor robuuste shop_mapping import
 
 # =========================
 # Page & styling
@@ -173,7 +174,7 @@ def compute_csm2i_and_uplift(df: pd.DataFrame, ref_spv: float, csm2i_target: flo
     return out
 
 # =========================
-# Shop mapping
+# Shop mapping (ROBUUST, zoals je snippet)
 # =========================
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -182,32 +183,103 @@ if str(ROOT) not in sys.path:
 _MAP = {}
 _import_err = None
 try:
-    from shop_mapping import SHOP_NAME_MAP as _MAP  # {id:int: "Naam"}
+    import shop_mapping as sm
+    for cand in ("SHOP_NAME_MAP", "SHOP_ID_TO_NAME", "SHOP_MAP", "MAP"):
+        if hasattr(sm, cand):
+            _MAP = getattr(sm, cand) or {}
+            break
+    if not _MAP:
+        _import_err = "Geen geldige mapping‑variabele in shop_mapping.py (verwacht bv. SHOP_NAME_MAP)."
+except Exception as e:
+    _import_err = f"Kon shop_mapping niet importeren: {e}"
+
+try:
+    SHOP_ID_TO_NAME = {int(k): str(v) for k, v in dict(_MAP).items() if str(v).strip()}
 except Exception:
-    _MAP = {}
-SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _MAP.items() if str(v).strip()}
+    SHOP_ID_TO_NAME = {}
 NAME_TO_ID = {v: k for k, v in SHOP_ID_TO_NAME.items()}
+
+if not NAME_TO_ID:
+    msg = "Geen filialen geladen. "
+    if _import_err:
+        msg += f"Details: {_import_err}"
+    msg += "\nControleer of `shop_mapping.py` in de project root staat en bv. bevat:\n\n" \
+           "SHOP_NAME_MAP = { 31831: 'Den Bosch', 32224: 'Amersfoort', ... }"
+    st.error(msg)
+    st.stop()
+else:
+    st.caption(f"🔗 Shop mapping geladen: {len(NAME_TO_ID)} filialen.")
+
 names = sorted(NAME_TO_ID.keys(), key=str.lower)
 
 # =========================
 # UI – periode, granulariteit, winkels, targets
+# (ALLEEN DIT PERIODE‑DEEL IS UITGEBREID)
 # =========================
+PERIOD_OPTIONS = [
+    "Last week",
+    "This month",
+    "Last month",
+    "This quarter",
+    "Last quarter",
+    "This year",
+    "Last year",
+]
+
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    period_label = st.selectbox("Periode", ["7 dagen", "30 dagen", "last_month"], index=0)
+    period_label = st.selectbox("Periode", PERIOD_OPTIONS, index=1)
 with c2:
     gran = st.selectbox("Granulariteit", ["Dag", "Uur"], index=0)
 with c3:
     proj_toggle = st.toggle("Toon projectie voor resterend jaar", value=False)
 
-# datums
+# Datums voor API (period=date met from/to)
 today = date.today()
-if period_label == "last_month":
-    first = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-    last  = today.replace(day=1) - timedelta(days=1)
-    date_from, date_to = first, last
-elif period_label == "30 dagen":
-    date_from, date_to = today - timedelta(days=30), today - timedelta(days=1)
+
+def month_start(d: date) -> date:
+    return d.replace(day=1)
+
+def month_end(d: date) -> date:
+    return (d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+def quarter_start(d: date) -> date:
+    q = (d.month - 1) // 3
+    m = 1 + 3*q
+    return date(d.year, m, 1)
+
+def quarter_end(d: date) -> date:
+    qs = quarter_start(d)
+    end_month = qs.month + 2
+    return month_end(date(qs.year, end_month, 1))
+
+def prev_quarter_range(d: date):
+    qs = quarter_start(d)
+    last_day_prev_q = qs - timedelta(days=1)
+    sp = quarter_start(last_day_prev_q)
+    ep = quarter_end(last_day_prev_q)
+    return sp, ep
+
+if period_label == "Last week":
+    # Vorige kalenderweek (ma-zo)
+    weekday = today.weekday()  # Monday=0
+    last_monday = today - timedelta(days=weekday + 7)
+    last_sunday = last_monday + timedelta(days=6)
+    date_from, date_to = last_monday, last_sunday
+elif period_label == "This month":
+    date_from, date_to = month_start(today), today - timedelta(days=1)
+elif period_label == "Last month":
+    first_this = month_start(today)
+    last_prev = first_this - timedelta(days=1)
+    date_from, date_to = month_start(last_prev), last_prev
+elif period_label == "This quarter":
+    date_from, date_to = quarter_start(today), today - timedelta(days=1)
+elif period_label == "Last quarter":
+    date_from, date_to = prev_quarter_range(today)
+elif period_label == "This year":
+    date_from, date_to = date(today.year, 1, 1), today - timedelta(days=1)
+elif period_label == "Last year":
+    date_from, date_to = date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
 else:
     date_from, date_to = today - timedelta(days=7), today - timedelta(days=1)
 
@@ -237,8 +309,8 @@ analyze = st.button("🔍 Analyseer", type="secondary")
 # =========================
 def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, show_hours=None, timeout=60):
     """
-    Primary: repeat keys (data, data_output) + step=hour|day  -> like Dead Hour app.
-    Fallback: bracketed keys (data[], data_output[]) + period_step=... if the server rejects primary.
+    Primary: repeat keys (data, data_output) + step=hour|day.
+    Fallback: bracketed keys (data[], data_output[]) + period_step=... als server primary afwijst.
     """
     # --- primary (repeat keys, step)
     params = [
@@ -257,7 +329,6 @@ def fetch_report(api_url, shop_ids, dfrom, dto, step, outputs, show_hours=None, 
         params.append(("show_hours_from", f"{sh:02d}:00"))
         params.append(("show_hours_to",   f"{eh:02d}:00"))
 
-    # Build URL manually to preserve repeated keys exactly like Dead Hour
     qs = urlencode(params, doseq=True).replace("%3A", ":")
     url = f"{api_url}?{qs}"
 
@@ -308,10 +379,15 @@ def normalize_resp(resp):
     df["hour"] = ts.dt.hour
     # map names after creation (faster)
     try:
-        from shop_mapping import SHOP_NAME_MAP as _MAP2
+        import shop_mapping as sm2
+        _M2 = None
+        for cand in ("SHOP_NAME_MAP", "SHOP_ID_TO_NAME", "SHOP_MAP", "MAP"):
+            if hasattr(sm2, cand):
+                _M2 = getattr(sm2, cand) or {}
+                break
+        _SHOP_ID_TO_NAME = {int(k): str(v) for k, v in dict(_M2 or {}).items() if str(v).strip()}
     except Exception:
-        _MAP2 = {}
-    _SHOP_ID_TO_NAME = {int(k): str(v) for k, v in _MAP2.items() if str(v).strip()}
+        _SHOP_ID_TO_NAME = {}
     df["shop_name"] = df["shop_id"].map(_SHOP_ID_TO_NAME).fillna(df["shop_id"].astype(str))
     return df
 
@@ -323,7 +399,7 @@ if analyze:
         st.warning("Selecteer minimaal één winkel."); st.stop()
     API_URL = st.secrets.get("API_URL","").rstrip("/")
     if not API_URL:
-        st.warning("Stel API_URL in via .streamlit/secrets.toml"); st.stop()
+        st.warning("Stel `API_URL` in via .streamlit/secrets.toml"); st.stop()
 
     step = "hour" if gran.lower().startswith("u") else "day"
     outputs = ["count_in","transactions","turnover","conversion_rate","sales_per_visitor","sq_meter"]
@@ -400,17 +476,18 @@ if analyze:
         unsafe_allow_html=True
     )
     if proj_toggle:
-        # resterende dagen dit jaar
+        # gebaseerd op het daadwerkelijke #dagen in data
+        try:
+            days_in_period = int(pd.to_datetime(df["date"], errors="coerce").nunique())
+            if days_in_period <= 0:
+                days_in_period = (date_to - date_from).days + 1
+        except Exception:
+            days_in_period = (date_to - date_from).days + 1
+
         today2 = date.today()
         end_year = date(today2.year, 12, 31)
         rem_days = (end_year - today2).days
-        # dag-equivalent van gekozen periode
-        if period_label == "last_month":
-            days_in_period = (date_to - date_from).days + 1
-        elif period_label == "30 dagen":
-            days_in_period = 30
-        else:
-            days_in_period = 7
+
         daily_potential = g["uplift_total"].sum() / max(1, days_in_period)
         projection = daily_potential * max(0, rem_days)
         cB.markdown(
@@ -437,14 +514,14 @@ if analyze:
 
     # ===== Scatter: SPV vs Sales per m² (kleur = CSm²I t.o.v. target) =====
     rad = g.copy()
-    low_thr  = float(csm2i_target) * 0.95
-    high_thr = float(csm2i_target) * 1.05
+    csm2i_target = float(csm2i_target)
+    low_thr  = csm2i_target * 0.95
+    high_thr = csm2i_target * 1.05
     rad["csm2i_band"] = np.select(
         [rad["csm2i"] < low_thr, rad["csm2i"] > high_thr],
         ["Onder target", "Boven target"],
         default="Rond target",
     )
-    # maat: total uplift
     rad["size_metric"] = rad["uplift_total"].fillna(0.0)
     rad["hover_spv"]   = rad["spv"].round(2).apply(fmt_eur2)
     rad["hover_spsqm"] = rad["spsqm"].round(2).apply(fmt_eur2)
@@ -482,9 +559,9 @@ if analyze:
 
     # ===== Aanbevelingen per winkel =====
     st.markdown("## Aanbevelingen per winkel")
-    # benchmark SPV (best performer) t.b.v. vergelijk
     best_spv = g.loc[g["spv"].idxmax(), "spv"] if not g.empty else 0.0
 
+    conv_target = float(conv_goal_pct) / 100.0
     for _, row in g.sort_values("uplift_total", ascending=False).iterrows():
         name = row["shop_name"]; sid = int(row["shop_id"])
         csi = float(row["csm2i"]); spv_store = float(row["spv"]); spsqm_store = float(row["spsqm"])
@@ -492,7 +569,6 @@ if analyze:
         up_csm = float(row["uplift_csm"]); up_conv = float(row["uplift_conv"])
         total_up = float(row["uplift_total"])
 
-        # kleurindicatie
         if csi < low_thr:
             badge = '<span class="badge badge-red">🔴 onder target</span>'
         elif csi > high_thr:
@@ -500,7 +576,6 @@ if analyze:
         else:
             badge = '<span class="badge badge-amber">🟠 rond target</span>'
 
-        # vergelijk t.o.v. beste SPV
         spv_comp = f"{fmt_eur2(spv_store)} vs best {fmt_eur2(best_spv)}" if best_spv > 0 else fmt_eur2(spv_store)
 
         st.markdown(f"### {name} {badge}", unsafe_allow_html=True)
@@ -534,7 +609,6 @@ if analyze:
         sub_all = sub_all[(sub_all['hour'] >= open_start) & (sub_all['hour'] < open_end)]
         sub_all['date_ts'] = pd.to_datetime(sub_all['date'], errors='coerce')
         sub_all = sub_all.dropna(subset=['date_ts'])
-        # per store-hour: sommen + dagen aanwezig → gewogen metrics
         grp_all = sub_all.groupby(['shop_id','shop_name','hour'], as_index=False).agg(
             visitors_sum=('count_in','sum'),
             turnover_sum=('turnover','sum'),
@@ -544,7 +618,7 @@ if analyze:
         grp_all['visitors_avg'] = grp_all['visitors_sum'] / grp_all['days_present'].replace(0, np.nan)
         grp_all['spv_hour'] = grp_all['turnover_sum'] / (grp_all['visitors_sum'] + 1e-9)
         grp_all['conv_hour'] = grp_all['transactions_sum'] / (grp_all['visitors_sum'] + 1e-9)
-        # Tabs voor 3 perspectieven
+
         t1, t2, t3 = st.tabs(["Bezoekers/uur", "SPV/uur", "Conversie/uur"])
         with t1:
             fig1 = px.bar(grp_all, x='hour', y='visitors_avg', color='shop_name', barmode='group', labels={'visitors_avg':'Gem. bezoekers'})
@@ -560,7 +634,6 @@ if analyze:
             fig3.update_layout(height=360, margin=dict(l=20,r=20,t=10,b=10), xaxis=dict(dtick=1), yaxis=dict(tickformat=',.1f'))
             st.plotly_chart(fig3, use_container_width=True)
 
-        # Optie: individuele secties tonen/verbergen
         show_individual = st.toggle('Toon individuele vestigingen (uurprofielen & heatmaps)', value=True)
 
 # ===== Uur‑drilldown (alleen wanneer 'Uur' is gekozen) =====
@@ -578,7 +651,6 @@ if analyze:
             sub["date_ts"] = pd.to_datetime(sub["date"])  # for #days
 
             with st.expander(f"⏱️ {name} — uurprofiel & heatmap", expanded=False):
-                # ===== Per uur (gewogen)
                 grp_h = sub.groupby("hour", as_index=False).agg(
                     visitors_sum=("count_in","sum"),
                     turnover_sum=("turnover","sum"),
@@ -589,7 +661,6 @@ if analyze:
                 grp_h["spv_hour"] = grp_h["turnover_sum"] / (grp_h["visitors_sum"] + EPS)
                 grp_h["conv_hour"] = grp_h["transactions_sum"] / (grp_h["visitors_sum"] + EPS)
 
-                # Hovertext (EU‑notatie)
                 grp_h["visitors_txt"] = grp_h["visitors_avg"].round(0).apply(fmt_int) + " bezoekers"
                 grp_h["spv_txt"] = grp_h["spv_hour"].apply(fmt_eur2)
                 grp_h["conv_txt"] = grp_h["conv_hour"].apply(lambda v: fmt_pct(v, 1))
@@ -605,12 +676,12 @@ if analyze:
                 ))
                 fig.add_trace(go.Scatter(
                     x=grp_h["hour"], y=grp_h["spv_hour"], name="SPV (€)", mode="lines+markers",
-                    customdata=custom_spv,
+                    customdata=np.stack([grp_h["spv_txt"].values], axis=1),
                     hovertemplate="Uur %{x:02d}:00<br>SPV: %{customdata[0]}<extra></extra>",
                 ))
                 fig.add_trace(go.Scatter(
                     x=grp_h["hour"], y=grp_h["conv_hour"]*100, name="Conversie (%)", mode="lines+markers",
-                    customdata=custom_conv,
+                    customdata=np.stack([grp_h["conv_txt"].values], axis=1),
                     hovertemplate="Uur %{x:02d}:00<br>Conversie: %{customdata[0]}<extra></extra>",
                 ))
                 fig.update_layout(
