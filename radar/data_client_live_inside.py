@@ -4,6 +4,27 @@ from typing import Dict, List, Optional
 class RadarAPIError(Exception):
     pass
 
+# --- NEW: URL normalizer ----------------------------------------------------
+def _report_and_live_urls(api_url: str) -> (str, str):
+    """
+    - Accepteert zowel:
+        https://vemcount-agent.onrender.com/get-report
+        https://vemcount-agent.onrender.com
+    - Retourneert:
+        report_url = .../get-report
+        live_url   = .../live-inside
+    """
+    if not api_url:
+        raise RadarAPIError("Empty API_URL; set .streamlit/secrets.toml / App settings")
+    u = api_url.rstrip("/")
+    # report_url: zorg dat /get-report er staat
+    report_url = u if u.endswith("/get-report") else f"{u}/get-report"
+    # live_url: basis zonder /get-report + /live-inside
+    base = u[:-len("/get-report")] if u.endswith("/get-report") else u
+    live_url = f"{base}/live-inside"
+    return report_url, live_url
+# ---------------------------------------------------------------------------
+
 def fetch_report(api_url: str, shop_ids: List[int], data_outputs: List[str],
                  date_from: str, date_to: str, period_step: str = "day",
                  show_hours_from: Optional[str] = None, show_hours_to: Optional[str] = None,
@@ -32,7 +53,8 @@ def fetch_report(api_url: str, shop_ids: List[int], data_outputs: List[str],
     if show_hours_to:
         params["show_hours_to"] = show_hours_to
 
-    resp = requests.post(f"{api_url.rstrip('/')}/get-report", params=params, timeout=timeout)
+    report_url, _ = _report_and_live_urls(api_url)
+    resp = requests.post(report_url, params=params, timeout=timeout)
     if resp.status_code != 200:
         raise RadarAPIError(f"Proxy returned {resp.status_code}: {resp.text[:400]}")
     try:
@@ -44,7 +66,6 @@ def fetch_report(api_url: str, shop_ids: List[int], data_outputs: List[str],
 def fetch_live_inside(api_url: str, location_ids: List[int], source: str = "locations", timeout: int = 30) -> Dict:
     """
     Fetch live inside data via the FastAPI proxy.
-    Endpoint: POST {API_URL}/live-inside
     Query params (no [] in param names):
       - source = "locations" | "zones"
       - data   = repeated per location/zone id
@@ -56,12 +77,10 @@ def fetch_live_inside(api_url: str, location_ids: List[int], source: str = "loca
     if source not in ("locations", "zones"):
         raise RadarAPIError("source must be 'locations' or 'zones'")
 
-    # Build params without [] to match existing proxy convention
-    params = {"source": source, "data": []}
-    for loc_id in location_ids:
-        params.setdefault("data", []).append(int(loc_id))
+    params = {"source": source, "data": [int(loc_id) for loc_id in location_ids]}
 
-    resp = requests.post(f"{api_url.rstrip('/')}/live-inside", params=params, timeout=timeout)
+    _, live_url = _report_and_live_urls(api_url)
+    resp = requests.post(live_url, params=params, timeout=timeout)
     if resp.status_code != 200:
         raise RadarAPIError(f"Proxy returned {resp.status_code}: {resp.text[:400]}")
     try:
