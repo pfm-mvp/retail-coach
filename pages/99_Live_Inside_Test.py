@@ -1,4 +1,11 @@
 import streamlit as st
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]   # project root = parent van /pages
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# ------------------------------------------------------------------
+
 from radar.data_client_live_inside import fetch_live_inside  # uses copy with live-inside added
 from shop_mapping import SHOP_NAME_MAP
 
